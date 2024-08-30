@@ -37,6 +37,8 @@ class CodetlinguaDataset():
             self.target_lang,
             completion_id,
         )
+        if result is None:
+            result = "timeout" # Killed by untrusted_check because of timeout
         return result
     
     def __getitem__(self, i):
@@ -45,19 +47,27 @@ class CodetlinguaDataset():
     def __len__(self):
         return len(self.problems)
 
-def extract_code_block(text):
+def extract_code_block(text, select_idx=0):
     # Regular expression to find any code block starting and ending with ```
     pattern = r"```.*?\n(.*?)```"
-    match = re.search(pattern, text, re.DOTALL)
+    match = re.findall(pattern, text, re.DOTALL)
+    
+    if select_idx < 0:
+        return match
 
-    if match:
-        # Return the matched code block without the delimiters
-        return match.group(1).strip()
+    if len(match) > 0:
+        return match[select_idx]
     else:
         return None
+
+    #if match:
+    #    # Return the matched code block without the delimiters
+    #    return match.group(1).strip()
+    #else:
+    #    return None
 
 
 def load_shelve(path):
     with shelve.open(path) as db:
-        loaded_data = list(db.keys())
+        loaded_data = dict(db)
     return loaded_data

@@ -10,9 +10,6 @@ import shelve
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-import utils
-import dataset_utils
-
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 CODE_NOT_FOUND_FLAG = "NO_CODE"
 
@@ -52,10 +49,16 @@ def main(
     output_path: Annotated[Path, typer.Option()] = None,
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
 ):
+    
     logger.info(f"Evaluate {task}")
     start = time.time()
     with open(config_file, 'r') as file:
         config_dict = yaml.safe_load(file)
+
+    if "HF_HOME" in config_dict["system_setting"]:
+        os.environ["HF_HOME"] = config_dict["system_setting"]["HF_HOME"]
+    import utils
+    import dataset_utils
     
     ## Load model
     model_name = config_dict["llm_config"]["model_name"]
