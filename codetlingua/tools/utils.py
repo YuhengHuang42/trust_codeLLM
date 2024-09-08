@@ -70,6 +70,7 @@ def exec_sample(
     target_lang: str,
     completion_id: int,
     stat: Value,
+    output_error_case: bool=False,
 ):
     import shutil
 
@@ -122,6 +123,8 @@ def exec_sample(
                     continue
 
                 else:
+                    if output_error_case:
+                        print("Error Test Case: {}".format(i))
                     if stderr_data.decode()=='':
                         stat.value = _TEST_FAILED
                     else:
@@ -129,6 +132,8 @@ def exec_sample(
                     break
 
         except Exception as e:
+            if output_error_case:
+                print("Error Test Case", "Error: ", e, e.stderr)
             stat.value = _COMPILE_FAILED
     
         shutil.rmtree(f"temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}")
@@ -136,12 +141,15 @@ def exec_sample(
     elif target_lang =="Java":
 
         with open(f"temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}/{problem['id']}.java", "w") as f:
-            pattern = re.compile(r'\bclass\s+\w+')
-            code = re.sub(pattern, f'class {problem["id"]}', code)
+            #pattern = re.compile(r'\bclass\s+\w+')
+            pattern = re.compile(r'\bpublic class\s+\w+')
+            #code = re.sub(pattern, f'class {problem["id"]}', code)
+            # Replace only the first occurrence of 'class' with the desired main class name
+            code = re.sub(pattern, f'class {problem["id"]}', code, count=1)
             f.write(code)
         
         try:
-            subprocess.run(f"javac temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}/{problem['id']}.java", check=True, capture_output=True, shell=True, timeout=30)
+            subprocess.run(f"javac temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}/{problem['id']}.java", check=True, capture_output=True, shell=True, timeout=100)
 
             test_io = problem['test_IO']
             for i in range(len(test_io)):
@@ -182,13 +190,18 @@ def exec_sample(
                     continue
 
                 else:
+                    if output_error_case:
+                        print("Error Test Case: {}".format(i))
                     if stderr_data.decode()=='':
                         stat.value = _TEST_FAILED
                     else:
                         stat.value = _RUNTIME_FAILED
                     break
         
-        except Exception as e:
+        except subprocess.CalledProcessError as e:
+            if output_error_case:
+                print("Error Test Case", "Error: ", e, e.stderr)
+                raise Exception(e)
             stat.value = _COMPILE_FAILED
         
         shutil.rmtree(f"temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}")
@@ -240,6 +253,8 @@ def exec_sample(
                     continue
 
                 else:
+                    if output_error_case:
+                        print("Error Test Case: {}".format(i))
                     if stderr_data.decode()=='':
                         stat.value = _TEST_FAILED
                     else:
@@ -247,6 +262,8 @@ def exec_sample(
                     break
         
         except Exception as e:
+            if output_error_case:
+                print("Error Test Case", "Error: ", e, e.stderr)
             stat.value = _COMPILE_FAILED
         
         shutil.rmtree(f"temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}")
@@ -298,6 +315,8 @@ def exec_sample(
                     continue
 
                 else:
+                    if output_error_case:
+                        print("Error Test Case: {}".format(i))
                     if stderr_data.decode()=='':
                         stat.value = _TEST_FAILED
                     else:
@@ -305,6 +324,8 @@ def exec_sample(
                     break
         
         except Exception as e:
+            if output_error_case:
+                print("Error Test Case", "Error: ", e, e.stderr)
             stat.value = _COMPILE_FAILED
         
         shutil.rmtree(f"temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}")
@@ -356,6 +377,8 @@ def exec_sample(
                     continue
 
                 else:
+                    if output_error_case:
+                        print("Error Test Case: {}".format(i))
                     if stderr_data.decode()=='':
                         stat.value = _TEST_FAILED
                     else:
@@ -363,6 +386,8 @@ def exec_sample(
                     break
         
         except Exception as e:
+            if output_error_case:
+                print("Error Test Case", "Error: ", e, e.stderr)
             stat.value = _COMPILE_FAILED
         
         shutil.rmtree(f"temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}")
@@ -373,6 +398,7 @@ def untrusted_check(
     code: str,
     target_lang: str,
     completion_id: int,
+    output_error_case: bool=False,
 ) -> Tuple[str, np.ndarray]:
 
     # shared memory objects
@@ -386,6 +412,7 @@ def untrusted_check(
             target_lang,
             completion_id,
             stat,
+            output_error_case
         ),
     )
 
