@@ -151,14 +151,24 @@ class CodetlinguaDataset(CodeDataset):
 
 #export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
 #export PATH=$PATH:$JAVA_HOME/bin
+
 class Defects4jDataset(CodeDataset):
-    def __init__(self, repair_data_path, loc_folder, defect4j_path, java_home=None, local_cache_path="/tmp/"):
+    def __init__(self, 
+                 repair_data_path, 
+                 loc_folder, 
+                 defect4j_path, 
+                 java_home=None, 
+                 local_cache_path="/tmp/", 
+                 only_same=True,
+                 used_prompt=JAVA_LONG_VARY_PROMPT):
         # Reference: Automated Program Repair in the Era of Large Pre-trained Language Models
         self.repair_data_path = repair_data_path
         self.local_cache_path = local_cache_path
         self.loc_folder = loc_folder
         self.defect4j_path = defect4j_path
         self.java_home = java_home
+        self.only_same = only_same
+        self.used_prompt = used_prompt
         self.env = os.environ.copy()
         self.env["PATH"] = defect4j_path + os.pathsep + self.env["PATH"]
         self.cache = dict()
@@ -170,7 +180,7 @@ class Defects4jDataset(CodeDataset):
         
         with open(repair_data_path, "r") as f:
             self.problems = json.JSONDecoder(object_pairs_hook=collections.OrderedDict).decode(f.read())
-        self.clean_result = Defects4jDataset.clean_parse_d4j(self.problems)
+        self.clean_dataset = Defects4jDataset.clean_parse_d4j(self.problems)
         self.index = list(self.problems.keys())
         
         self.metadata = dict()
@@ -190,6 +200,14 @@ class Defects4jDataset(CodeDataset):
     def __getitem__(self, i):
         return self.problems[self.index[i]]
 
+    def get_prompt(self, bug_id):
+        # file_name: 'Chart-1.java'
+        file_name = bug_id + ".java"
+        example_bug, example_fix = Defects4jDataset.pick_smallest_example_fix(self.clean_dataset, file_name, only_same=self.only_same)
+        prompt = self.used_prompt.format(example_bug=example_bug, example_fix=example_fix, bug=self.problems[bug_id]['buggy'])
+        return prompt
+        
+        
     def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
         bug_id = self.index[problem_id]
         project = self.metadata[bug_id]["project"]
@@ -368,6 +386,26 @@ class Defects4jDataset(CodeDataset):
                 entire_bugg = True
 
         return compile_fail, timed_out, bugg, entire_bugg, False
+
+    # picking an example fix pairs from a project
+    @staticmethod
+    def pick_smallest_example_fix(bugs, current_bug, only_same=False):
+        def _get_relevant_bugs(bugs, current_bug, only_same):
+            potential_pairs = []
+            project = current_bug.split("-")[0]
+            for file_name, bug in bugs.items():
+                if file_name == current_bug:
+                    continue
+                if file_name.startswith(project + "-") and only_same:
+                    potential_pairs.append((len(bug['buggy']) + len(bug['fix']), file_name))
+                elif not only_same:
+                    potential_pairs.append((len(bug['buggy']) + len(bug['fix']), file_name))
+            # sort from smallest to largest
+            potential_pairs.sort(key=lambda x: x[0])
+            return potential_pairs
+        
+        potential_pairs = _get_relevant_bugs(bugs, current_bug, only_same)
+        return bugs[potential_pairs[0][1]]['buggy'], bugs[potential_pairs[0][1]]['fix']
     
     
 
