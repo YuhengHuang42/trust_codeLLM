@@ -11,8 +11,9 @@ import javalang
 import time
 import signal
 from loguru import logger
-
 from abc import ABC
+
+import utils
 
 # Defects4jDataset prompt
 JAVA_LONG_VARY_PROMPT = """// Provide a fix for the buggy function
@@ -405,12 +406,20 @@ class Defects4jDataset(CodeDataset):
             return potential_pairs
         
         potential_pairs = _get_relevant_bugs(bugs, current_bug, only_same)
+        if len(potential_pairs) == 0:
+            # No other bugs in the same project
+            potential_pairs = _get_relevant_bugs(bugs, current_bug, only_same=False)
         return bugs[potential_pairs[0][1]]['buggy'], bugs[potential_pairs[0][1]]['fix']
     
     
 
 def extract_code_block(text, select_idx=None):
+    """
+    Extract code block enclosed by ``` ```.
+    Return the code block and its start and end positions in the text.
+    """
     code_blocks = []
+    code_blocks_info = []
     start = 0
 
     while True:
@@ -431,19 +440,23 @@ def extract_code_block(text, select_idx=None):
         #print(end_idx)
         code_block = text[code_start:end_idx].strip()
         
-        code_blocks.append(code_block)
 
         # Update the start position to search for the next code block
         start = end_idx
+        if len(code_block) == 0:
+            continue
+        
+        code_blocks.append(code_block)
+        code_blocks_info.append([code_start, end_idx])
 
     if select_idx is None:
-        return code_blocks  # Return all matches if no specific index is requested
+        return code_blocks, code_blocks_info  # Return all matches if no specific index is requested
 
     # Return specific match if select_idx is provided and within range
     if 0 <= select_idx < len(code_blocks):
-        return code_blocks[select_idx]
+        return code_blocks[select_idx], code_blocks_info[select_idx]
     else:
-        return None  # Return None if select_idx is out of bounds
+        return None, None  # Return None if select_idx is out of bounds
 
 
 '''    
@@ -467,7 +480,182 @@ def extract_code_block(text, select_idx=0):
     #    return None
 '''
 
+# === Utility functions for finding positions of substrings in strings for code translation dataset. ===
+def find_all_substring_positions(original_string, sub_string):
+    """
+    Given original_string and sub_string, find all occurrences of the sub_string in original_string
+    ---
+    Args:
+        original_string: string
+        substring: string
+    Output:
+        List[Tuple]: list of start and end position tuples. 
+    """
+    positions = []
+    start_pos = 0
+    
+    # Loop through the string to find all occurrences
+    while True:
+        start_pos = original_string.find(sub_string, start_pos)
+        
+        # If no more occurrences are found, break the loop
+        if start_pos == -1:
+            break
+        
+        # Calculate the end position
+        end_pos = start_pos + len(sub_string) - 1
+        
+        # Append the start and end positions as a tuple to the list
+        positions.append((start_pos, end_pos))
+        
+        # Move the start_pos to the next character after the current match to avoid infinite loop
+        start_pos += 1
+    
+    return positions
+
+def find_code_block_positions(original_string, sub_string):
+    """
+    Given original_string and sub_string, find all occurrences of the sub_string in original_string
+    ---
+    Args:
+        original_string: string
+        sub_string: string
+    Output:
+        List[Tuple]: list of start and end Line Number tuples. 
+    """
+    # Split the original and sub string into lines
+    original_lines = original_string.splitlines()
+    sub_lines = sub_string.splitlines()
+    
+    # List to store all matching positions
+    matches = []
+    
+    # Iterate over the original string lines
+    for i in range(len(original_lines)):
+        # Check if the current line matches the first line of the sub_string
+        if original_lines[i].strip() == sub_lines[0].strip():
+            # Assume it's a match, start checking the following lines
+            match_found = True
+            for j in range(1, len(sub_lines)):
+                # If we go out of bounds of the original lines or a line doesn't match, set match_found to False
+                if i + j >= len(original_lines) or original_lines[i + j].strip() != sub_lines[j].strip():
+                    match_found = False
+                    break
+            
+            # If all lines matched, calculate the start and end positions in the original string
+            if match_found:
+                start_pos = i
+                end_pos = i + len(sub_lines)
+                matches.append((start_pos, end_pos))
+    
+    # Return the list of matched positions as tuples (start_line, end_line)
+    return matches
+
+def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1):
+    """
+    Collect all buggy positions according to raw_buggy_code
+    ---
+    Args:
+        original_code: str
+        raw_buggy_code: str. Returned response from OPENAI.
+        logging_idx: str. Used for reporting error and debugging
+    Output:
+        List[Tuple]: list of start and end Line Number tuples.
+    """
+    # The last one is the fully runnable code
+    # The second-last one is the text description
+    code_block, code_block_info = extract_code_block(raw_buggy_code, None)
+    buggy_code_list = code_block[:-2]
+    result = list()
+    if len(buggy_code_list) == 0:
+        return result
+    for buggy_code in buggy_code_list:
+        positions = find_code_block_positions(original_code, buggy_code)
+        if len(positions) == 0:
+            logger.error(f"No matching position find for {logging_idx}")
+            logger.error(f"buggy_code: {buggy_code}")
+            logger.error(f"Original code: {original_code}")
+        result += positions
+    return result
+
+def get_candidate_tokens(data, key, tokenizer, lang):
+    """
+    Get candidate tokens per line.
+    Use is_line_only_punctuators_pygments to filter out lines that only contain punctuators.
+    ---
+    Args:
+        data: dict. data_index -> collected data mapping
+        key: str. data_index
+        tokenizer: TokenizerFast. The tokenizer used in model inference.
+        lang: str. The language of the code block.
+    Output:
+        candidate_tokens: List[List]: List of token idx. Each list corresponds to a line in the code block.
+    """
+    code_blocks, code_blocks_info = extract_code_block(data[key]['str_output'])
+    line_char_mapping = utils.get_line_to_char_index_mapping(data[key]['str_output'])
+
+    target_code_block_info = code_blocks_info[-1] # The last code enclosed by ``` ```.
+    tokenized_info = tokenizer(data[key]['str_output'], return_offsets_mapping=True, add_special_tokens=False)
+
+    line_num = len(line_char_mapping)
+    split_response = data[key]['str_output'].splitlines()
+    # Find the start position of the code block
+    for idx in range(line_num):
+        if line_char_mapping[idx][-1] <= target_code_block_info[0]:
+            continue
+        else:
+            start_line = idx
+            break
+
+    # Find the end position of the code block
+    for idx in range(start_line, line_num):
+        if line_char_mapping[idx][0] < target_code_block_info[1]:
+            continue
+        else:
+            end_line = idx
+            break
+
+    # Collect candidate tokens per line.
+    # Ignore lines that only contain punctuators such as ;}
+    candidate_tokens = []
+    for idx in range(start_line, end_line):
+        if utils.is_line_only_punctuators_pygments(split_response[idx], lang):
+            continue
+        tokens = utils.get_token_indices(tokenized_info["offset_mapping"], line_char_mapping[idx][0], line_char_mapping[idx][1])
+        candidate_tokens.append(tokens)
+    return candidate_tokens
+
+
 def load_shelve(path):
     with shelve.open(path) as db:
         loaded_data = dict(db)
     return loaded_data
+
+def load_shelve_and_resume(dir_path):
+    """
+    Looping through the files under the dir_path. If there is more than
+    one shelve file, raise an Exception. Otherwise, record the already
+    saved count using len(loaded_data) and return the next index
+    to resume.
+    """
+    import os
+    import shelve
+    # Get list of all shelve files in the directory
+    shelve_files = [f for f in os.listdir(dir_path) if f.endswith('.db') or f.endswith('.dat')]
+
+    # If there's more than one shelve file, raise an exception
+    if len(shelve_files) > 1:
+        raise Exception("More than one shelve file found in the directory.")
+    
+    # If no shelve file is found, return 0 as the starting index
+    if not shelve_files:
+        return 0, None
+    
+    # Load the shelve file
+    shelve_file = os.path.splitext(shelve_files[0])[0]
+    path = os.path.join(dir_path, shelve_file)
+    with shelve.open(path) as db:
+        loaded_data = list(db.keys())
+    
+    # Return the next index to resume
+    return len(loaded_data), path

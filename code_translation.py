@@ -16,6 +16,8 @@ CODE_NOT_FOUND_FLAG = "NO_CODE"
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
 def evaluate(llm, tokenizer, dataset, generate_config, save_path):
+    import utils
+    import dataset_utils
     generate_config = copy.deepcopy(generate_config)
     prompt = generate_config.pop("prompt")
     ans_recored = shelve.open(str(save_path))

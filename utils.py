@@ -1,8 +1,12 @@
 import os
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from collections import OrderedDict
 import torch
 import json
-    
+from pygments.lexers import get_lexer_by_name
+from pygments.token import Token
+import numpy as np
+  
 def identify_start_end_substr(original_tokens, target_str, tokenizer):
     """
     Find the start index and end index of the target_str in the original_str for tokenized string.
@@ -70,7 +74,7 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
         
     seq = seq[0]
     str_all = tokenizer.decode(seq)
-    str_output = tokenizer.decode(seq[input_length:])
+    str_output = tokenizer.decode(seq[input_length:], skip_special_tokens=True)
     result["str_all"] = str_all
     result["str_output"] = str_output
     token_output = seq.tolist()
@@ -212,4 +216,112 @@ def submit_batch_request_openai(client,
     batch_result_info = client.batches.retrieve(batch_submit_info_id)
     
     return (batch_submit_info, batch_result_info)
+
+def get_token_indices(mapping, start_char_pos, end_char_pos):
+    """
+    Obtain the token positions according to the mappping.
+    ===
+    Args:
+        mapping: dict, returned by return_offsets_mapping.
+        start_char_pos: int,
+        end_char_pos: int,
+    Return:
+        List[int]: 
+    """
+    indices = []
+    for idx, (token_start, token_end) in enumerate(mapping):
+        # Check if there's any overlap between the token and the target substring
+        if (token_end > start_char_pos and token_start < end_char_pos):
+            indices.append(idx)
+    return indices
+
+def get_line_to_char_index_mapping(text):
+    """
+    Obtain the string split by lines --> original character index.
+    Return:
+        List[List]: the list of [start, end) line position.
+    """
+    lines = text.splitlines(keepends=True)  # Split lines but keep newline characters
+    index_mapping = []
+    current_index = 0
     
+    for line in lines:
+        line_length = len(line)
+        line_mapping = [current_index, current_index + line_length]
+        index_mapping.append(line_mapping)
+        current_index += line_length
+    
+    return index_mapping
+
+def get_important_token_pos(important_line_info, data, tokenizer):
+    """
+    Get the position idx of the important token given the important_line_info.
+    ---
+    Args:
+        important_line_info: dict. data_index -> line mapping
+        data: dict. data_index -> collected data mapping
+        tokenizer: TokenizerFast. The tokenizer used in model inference.
+    Output:
+        target_buggy_positions: dict. data_index -> List[List]. Mapping from data_index to list of [start, end) token positions
+        important_token_info: dict. data_index -> List[List]. Mapping from data_index to the idx of token idx.
+            Each list corresponds to a ``` ``` block in the OPENAI response.
+    """
+    target_buggy_positions = OrderedDict()
+    important_token_info = OrderedDict()
+    for key in important_line_info:
+        split_response = data[key]['str_output'].splitlines()
+        single_info = important_line_info[key]
+        line_char_mapping = get_line_to_char_index_mapping(data[key]['str_output'])
+        target_buggy_positions[key] = list()
+        important_token_info[key] = list()
+        tokenized_info = tokenizer(data[key]['str_output'], return_offsets_mapping=True, add_special_tokens=False)
+        for item in single_info:
+            start_line_number = item[0]
+            end_line_number = item[1]
+            cleaned_line_number = list()
+            for inner_line_idx in range(start_line_number, end_line_number):
+                if is_line_only_punctuators_pygments(split_response[inner_line_idx]):
+                    continue
+                else:
+                    cleaned_line_number.append(inner_line_idx)
+            
+            mapping_result = [line_char_mapping[i] for i in cleaned_line_number]
+            target_buggy_positions[key] += mapping_result
+            important_token_info[key].append([])
+            for single in mapping_result:
+                important_token_info[key][-1] += get_token_indices(tokenized_info["offset_mapping"], single[0], single[1])
+    return (target_buggy_positions, important_token_info)
+
+
+def is_line_only_punctuators_pygments(line, language='c'):
+    """
+    Return True if the provided code lins only contains punctuators.
+    """
+    lexer = get_lexer_by_name(language)
+    tokens = lexer.get_tokens(line)
+    for tok_type, tok_val in tokens:
+        if tok_type in Token.Text.Whitespace:
+            continue
+        # Check if token is a punctuation or operator
+        elif tok_type in Token.Punctuation:
+            continue
+        else:
+            # Any other token type means the line contains more than punctuators
+            return False
+    return True
+
+def obtain_topk_tokens_by_prob(data, candidate_tokens, key, topk, agg_method=np.mean):
+    """
+    Obtain topk line tokens according to probability indicators.
+    """
+    # temp = np.array(data[key]['token_output'][data[key]['input_length']:])
+    gen_probes = np.array(data[key]['gen_probs'][0])
+    result = []
+    for per_line in candidate_tokens:
+        result.append(gen_probes[per_line])
+    mean_result = [agg_method(i) for i in result]
+    rank_per_line = sorted(list(zip(mean_result, [i for i in range(len(mean_result))])))[:topk]
+    selected_token = set()
+    for line in rank_per_line:
+        selected_token = selected_token.union(set(candidate_tokens[line[1]]))
+    return selected_token

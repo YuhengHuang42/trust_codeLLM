@@ -15,12 +15,14 @@ CODE_NOT_FOUND_FLAG = "NO_CODE"
 
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
-def evaluate(llm, tokenizer, dataset, generate_config, save_path):
+def evaluate(llm, tokenizer, dataset, generate_config, ans_recored, iter_list=None):
+    import utils
     generate_config = copy.deepcopy(generate_config)
     #prompt = generate_config.pop("prompt")
-    ans_recored = shelve.open(str(save_path))
+    if iter_list == None:
+        iter_list = range(len(dataset))
 
-    for idx, item in enumerate(tqdm.tqdm(dataset)):
+    for idx in iter_list:
         prompt = dataset.get_prompt(dataset.index[idx])
         generate_result = utils.generate_and_record(
             llm,
@@ -41,8 +43,7 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path):
         
         ans_recored[str(idx)] = generate_result
     
-    ans_recored.close()
-    
+#  python3 code_repair.py --config-file model_eval_config/CodeLlama_repair.yaml --output-path /data/huangyuheng/trust_code/codellama34b/repair/repair
 @app.command()
 def main(
     task: Annotated[str, typer.Option()] = 'defects4j',
@@ -75,7 +76,20 @@ def main(
     if task == "defects4j":
         assert "split" in config_dict["task_config"]
         dataset = dataset_utils.Defects4jDataset(data_path, loc_folder, defects4j_path, java_home=java_path)
-        evaluate(model, tokenizer, dataset, generate_config, output_path)
+        already_saved_length, saved_path = dataset_utils.load_shelve_and_resume(os.path.dirname(str(output_path)))
+        if already_saved_length == 0:
+            ans_recored = shelve.open(str(output_path))
+            iter_list = None
+        else:
+            logger.warning(f"Saved data already exists in {os.path.dirname(str(output_path))}. Resume from it. Start from {already_saved_length}.")
+            logger.warning(f"Please make sure this is expected. We anticipate there is only one file under a folder")
+            ans_recored = shelve.open(str(saved_path))
+            iter_list = range(already_saved_length, len(dataset))
+        evaluate(model, tokenizer, dataset, generate_config, ans_recored, iter_list)
+        ans_recored.close()
+    
+    end = time.time()
+    logger.info(f"Total time: {end-start}")
 
 if __name__ == "__main__":
     #typer.run(main)
