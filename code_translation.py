@@ -16,8 +16,8 @@ CODE_NOT_FOUND_FLAG = "NO_CODE"
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
 def evaluate(llm, tokenizer, dataset, generate_config, save_path):
-    import utils
-    import dataset_utils
+    import utility.utils as utils
+    import task.dataset_utils as dataset_utils
     generate_config = copy.deepcopy(generate_config)
     prompt = generate_config.pop("prompt")
     ans_recored = shelve.open(str(save_path))
@@ -32,10 +32,11 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path):
             generate_config=generate_config
         )
         # Evaluate the code
-        code = dataset_utils.extract_code_block(generate_result['str_output'])
-        if code is None:
+        code_blocks, code_blocks_info = dataset_utils.extract_code_block(generate_result['str_output'])
+        if code_blocks is None or len(code_blocks) == 0:
             code_correctness = CODE_NOT_FOUND_FLAG
         else:
+            code = code_blocks[-1]
             code_correctness = dataset.check_result(code, idx)
         generate_result["code_correctness"] = code_correctness
         generate_result["problem"] = {"code": problem, "prompt": prompt} 
@@ -59,8 +60,8 @@ def main(
 
     if "HF_HOME" in config_dict["system_setting"]:
         os.environ["HF_HOME"] = config_dict["system_setting"]["HF_HOME"]
-    import utils
-    import dataset_utils
+    import utility.utils as utils
+    from task.codetlingua_trans import CodetlinguaDataset
     
     ## Load model
     model_name = config_dict["llm_config"]["model_name"]
@@ -70,11 +71,14 @@ def main(
     
     if task == "codetlingua":
         assert "split" in config_dict["task_config"]
-        dataset = dataset_utils.CodetlinguaDataset(split=config_dict["task_config"]["split"], 
+        dataset = CodetlinguaDataset(split=config_dict["task_config"]["split"], 
                                                    source_lang=config_dict["task_config"]["source_lang"], 
                                                    target_lang=config_dict["task_config"]["target_lang"],
                                                    )
         evaluate(model, tokenizer, dataset, generate_config, output_path)
+    
+    end = time.time()
+    logger.info(f"Total time: {end - start}")
 
 if __name__ == "__main__":
     #typer.run(main)

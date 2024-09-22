@@ -16,7 +16,7 @@ CODE_NOT_FOUND_FLAG = "NO_CODE"
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
 def evaluate(llm, tokenizer, dataset, generate_config, ans_recored, iter_list=None):
-    import utils
+    import utility.utils as utils
     generate_config = copy.deepcopy(generate_config)
     #prompt = generate_config.pop("prompt")
     if iter_list == None:
@@ -59,8 +59,8 @@ def main(
 
     if "HF_HOME" in config_dict["system_setting"]:
         os.environ["HF_HOME"] = config_dict["system_setting"]["HF_HOME"]
-    import utils
-    import dataset_utils
+    import utility.utils as utils
+    from task.defect4j import Defects4jDataset
     data_path = config_dict["task_config"]["repair_data_path"]
     loc_folder = config_dict["task_config"]["repair_loc_folder"]
     defects4j_path = config_dict["system_setting"]['DEFECTS4J_PATH']
@@ -75,8 +75,8 @@ def main(
     
     if task == "defects4j":
         assert "split" in config_dict["task_config"]
-        dataset = dataset_utils.Defects4jDataset(data_path, loc_folder, defects4j_path, java_home=java_path)
-        already_saved_length, saved_path = dataset_utils.load_shelve_and_resume(os.path.dirname(str(output_path)))
+        dataset = Defects4jDataset(data_path, loc_folder, defects4j_path, java_home=java_path)
+        already_saved_length, saved_path = utils.load_shelve_and_resume(os.path.dirname(str(output_path)))
         if already_saved_length == 0:
             ans_recored = shelve.open(str(output_path))
             iter_list = None

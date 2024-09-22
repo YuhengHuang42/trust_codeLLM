@@ -325,3 +325,37 @@ def obtain_topk_tokens_by_prob(data, candidate_tokens, key, topk, agg_method=np.
     for line in rank_per_line:
         selected_token = selected_token.union(set(candidate_tokens[line[1]]))
     return selected_token
+
+def load_shelve(path):
+    with shelve.open(path) as db:
+        loaded_data = dict(db)
+    return loaded_data
+
+def load_shelve_and_resume(dir_path):
+    """
+    Looping through the files under the dir_path. If there is more than
+    one shelve file, raise an Exception. Otherwise, record the already
+    saved count using len(loaded_data) and return the next index
+    to resume.
+    """
+    import os
+    import shelve
+    # Get list of all shelve files in the directory
+    shelve_files = [f for f in os.listdir(dir_path) if f.endswith('.db') or f.endswith('.dat')]
+
+    # If there's more than one shelve file, raise an exception
+    if len(shelve_files) > 1:
+        raise Exception("More than one shelve file found in the directory.")
+    
+    # If no shelve file is found, return 0 as the starting index
+    if not shelve_files:
+        return 0, None
+    
+    # Load the shelve file
+    shelve_file = os.path.splitext(shelve_files[0])[0]
+    path = os.path.join(dir_path, shelve_file)
+    with shelve.open(path) as db:
+        loaded_data = list(db.keys())
+    
+    # Return the next index to resume
+    return len(loaded_data), path
