@@ -31,7 +31,6 @@ def evaluate(llm, tokenizer, dataset, generate_config, ans_recored, iter_list=No
             generate_config=generate_config
         )
         # Evaluate the code
-        #code = dataset_utils.extract_code_block(generate_result['str_output'])
         code = generate_result['str_output']
         #if code is None:
         #    code_correctness = CODE_NOT_FOUND_FLAG

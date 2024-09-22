@@ -17,7 +17,6 @@ CODE_NOT_FOUND_FLAG = "NO_CODE"
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
 def evaluate(llm, tokenizer, dataset, generate_config, save_path):
     import utility.utils as utils
-    import task.dataset_utils as dataset_utils
     generate_config = copy.deepcopy(generate_config)
     prompt = generate_config.pop("prompt")
     ans_recored = shelve.open(str(save_path))
@@ -32,7 +31,7 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path):
             generate_config=generate_config
         )
         # Evaluate the code
-        code_blocks, code_blocks_info = dataset_utils.extract_code_block(generate_result['str_output'])
+        code_blocks, code_blocks_info = utils.extract_code_block(generate_result['str_output'])
         if code_blocks is None or len(code_blocks) == 0:
             code_correctness = CODE_NOT_FOUND_FLAG
         else:

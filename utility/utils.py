@@ -3,6 +3,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from collections import OrderedDict
 import torch
 import json
+import os
+import shelve
 from pygments.lexers import get_lexer_by_name
 from pygments.token import Token
 import numpy as np
@@ -145,78 +147,6 @@ def read_jsonl(file_path):
     
     return data
     
-def generate_jsonl_for_openai(request_id_list, 
-                              message_list, 
-                              output_path,
-                              max_tokens=None, 
-                              model_type="gpt-4o-mini", 
-                              url="/v1/chat/completions"):
-    """
-    Prepare input batch data for OPENAI API
-    Args:
-        request_id_list: used to index the message_list.
-        message_list: list of messages to be sent to the API
-        output_path: output file path
-        max_tokens: maximum tokens to generate
-        model_type: model type of OPENAI API
-        url: API endpoint
-    """
-    assert len(request_id_list) == len(message_list)
-    data = []
-    requestid_to_message = dict(zip(request_id_list, message_list))
-    for idx, item in enumerate(request_id_list):
-        request_id = f"request-{item}"
-        message = message_list[idx]
-        body = {"model": model_type, 
-         "messages": [{"role": "system", "content": message["system"]},
-                      {"role": "user", "content": message["user"]}],
-        }
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
-        per_request = {
-            "custom_id": request_id,
-            "method": "POST",
-            "url": url,
-            "body": body
-        }
-        data.append(per_request)
-    
-    write_jsonl(output_path, data)
-    
-    return data, requestid_to_message
-
-def submit_batch_request_openai(client, 
-                                input_file_path, 
-                                url="/v1/chat/completions", 
-                                completion_window="24h", 
-                                description="code analysis"):
-    """
-    Submit the batch task to OPENAI API
-    Args:
-        client: OPENAI API client (client = openai.OpenAI(api_key=api_key))
-        input_file_path: input file path
-        url: API endpoint
-        completion_window: completion window
-        description: description of the submitted task
-    """
-    batch_input_file = client.files.create(
-        file=open(input_file_path, "rb"),
-        purpose="batch"
-    )
-    batch_input_file_id = batch_input_file.id
-    batch_submit_info = client.batches.create(
-        input_file_id=batch_input_file_id,
-        endpoint=url,
-        completion_window=completion_window,
-        metadata={
-        "description": description
-        }
-    )
-    batch_submit_info_id = batch_submit_info.id
-    batch_result_info = client.batches.retrieve(batch_submit_info_id)
-    
-    return (batch_submit_info, batch_result_info)
-
 def get_token_indices(mapping, start_char_pos, end_char_pos):
     """
     Obtain the token positions according to the mappping.
@@ -338,8 +268,6 @@ def load_shelve_and_resume(dir_path):
     saved count using len(loaded_data) and return the next index
     to resume.
     """
-    import os
-    import shelve
     # Get list of all shelve files in the directory
     shelve_files = [f for f in os.listdir(dir_path) if f.endswith('.db') or f.endswith('.dat')]
 
@@ -359,3 +287,48 @@ def load_shelve_and_resume(dir_path):
     
     # Return the next index to resume
     return len(loaded_data), path
+
+def extract_code_block(text, select_idx=None):
+    """
+    Extract code block enclosed by ``` ```.
+    Return the code block and its start and end positions in the text.
+    """
+    code_blocks = []
+    code_blocks_info = []
+    start = 0
+
+    while True:
+        # Find the start of a code block
+        start_idx = text.find("```", start)
+        if start_idx == -1:
+            break
+
+        # Find the end of the code block, starting after the found start
+        end_idx = text.find("```", start_idx + 3)
+        if end_idx == -1:
+            break
+
+        # Extract the content between the backticks
+        # Skip any text on the same line as the opening backticks
+        code_start = text.find("\n", start_idx + 3) + 1  # Find the start of the next line after the opening ```
+        #print(code_start)
+        #print(end_idx)
+        code_block = text[code_start:end_idx].strip()
+        
+
+        # Update the start position to search for the next code block
+        start = end_idx
+        if len(code_block) == 0:
+            continue
+        
+        code_blocks.append(code_block)
+        code_blocks_info.append([code_start, end_idx])
+
+    if select_idx is None:
+        return code_blocks, code_blocks_info  # Return all matches if no specific index is requested
+
+    # Return specific match if select_idx is provided and within range
+    if 0 <= select_idx < len(code_blocks):
+        return code_blocks[select_idx], code_blocks_info[select_idx]
+    else:
+        return None, None  # Return None if select_idx is out of bounds

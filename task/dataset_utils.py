@@ -19,53 +19,6 @@ class CodeDataset(ABC):
     def __getitem__(self, i):
         raise NotImplementedError
  
-
-def extract_code_block(text, select_idx=None):
-    """
-    Extract code block enclosed by ``` ```.
-    Return the code block and its start and end positions in the text.
-    """
-    code_blocks = []
-    code_blocks_info = []
-    start = 0
-
-    while True:
-        # Find the start of a code block
-        start_idx = text.find("```", start)
-        if start_idx == -1:
-            break
-
-        # Find the end of the code block, starting after the found start
-        end_idx = text.find("```", start_idx + 3)
-        if end_idx == -1:
-            break
-
-        # Extract the content between the backticks
-        # Skip any text on the same line as the opening backticks
-        code_start = text.find("\n", start_idx + 3) + 1  # Find the start of the next line after the opening ```
-        #print(code_start)
-        #print(end_idx)
-        code_block = text[code_start:end_idx].strip()
-        
-
-        # Update the start position to search for the next code block
-        start = end_idx
-        if len(code_block) == 0:
-            continue
-        
-        code_blocks.append(code_block)
-        code_blocks_info.append([code_start, end_idx])
-
-    if select_idx is None:
-        return code_blocks, code_blocks_info  # Return all matches if no specific index is requested
-
-    # Return specific match if select_idx is provided and within range
-    if 0 <= select_idx < len(code_blocks):
-        return code_blocks[select_idx], code_blocks_info[select_idx]
-    else:
-        return None, None  # Return None if select_idx is out of bounds
-
-
 '''    
 def extract_code_block(text, select_idx=0):
     # Regular expression to find any code block starting and ending with ```
@@ -171,7 +124,7 @@ def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1
     """
     # The last one is the fully runnable code
     # The second-last one is the text description
-    code_block, code_block_info = extract_code_block(raw_buggy_code, None)
+    code_block, code_block_info = utils.extract_code_block(raw_buggy_code, None)
     buggy_code_list = code_block[:-2]
     result = list()
     if len(buggy_code_list) == 0:
@@ -198,7 +151,7 @@ def get_candidate_tokens(data, key, tokenizer, lang):
     Output:
         candidate_tokens: List[List]: List of token idx. Each list corresponds to a line in the code block.
     """
-    code_blocks, code_blocks_info = extract_code_block(data[key]['str_output'])
+    code_blocks, code_blocks_info = utils.extract_code_block(data[key]['str_output'])
     line_char_mapping = utils.get_line_to_char_index_mapping(data[key]['str_output'])
 
     target_code_block_info = code_blocks_info[-1] # The last code enclosed by ``` ```.

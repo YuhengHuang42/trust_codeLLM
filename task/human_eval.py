@@ -11,10 +11,8 @@ Homepage: https://github.com/openai/human-eval
 """
 
 import re
-
 from evaluate import load
 
-from .base import Task
 
 _CITATION = """
 @misc{chen2021evaluating,
@@ -31,7 +29,7 @@ from abc import ABC, abstractmethod
 from warnings import warn
 
 from datasets import load_dataset
-
+from .dataset_utils import CodeDataset
 
 class Task(ABC):
     """A task represents an entire benchmark including its dataset, problems,
@@ -148,7 +146,7 @@ class HumanEval(Task):
             stop_index = decoded_string.find(stop_token)
             if stop_index != -1 and stop_index < min_stop_index:
                 min_stop_index = stop_index
-        return decoded_string[:min_stop_index]
+        return (decoded_string[:min_stop_index], min_stop_index)
 
     def postprocess_generation(self, generation, idx):
         """Defines the postprocessing for a LM generation.
@@ -160,7 +158,8 @@ class HumanEval(Task):
         """
         prompt = self.get_prompt(self.dataset["test"][idx])
         generation = generation[len(prompt) :]
-        return prompt + self._stop_at_stop_token(generation, self.stop_words)
+        cleaned_code, min_stop_index = self._stop_at_stop_token(generation, self.stop_words)
+        return (prompt + cleaned_code, min_stop_index)
 
     def process_results(self, generations, references):
         """Takes the list of LM generations and evaluates them against ground truth references,
@@ -176,3 +175,27 @@ class HumanEval(Task):
             predictions=generations,
         )
         return results
+
+class HumanEvalDataset(CodeDataset):
+    def __init__(self):
+        self.task = HumanEval()
+        self.problems = self.task.get_dataset()
+    
+    def __len__(self):
+        return len(self.problems)
+
+    def __getitem__(self, i):
+        return self.problems[i]
+    
+    def get_prompt(self, problem_id):
+        prompt = self.task.get_prompt(self.problems[problem_id])
+        return prompt
+    
+    def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
+        test_cases = self.task.get_reference(self.problems[problem_id])
+        result = self.task.process_results([[generate_code]], [test_cases])
+        return result
+    
+    def postprocess(self, generate_code, problem_id):
+        code, min_stop_index = self.task.postprocess_generation(generate_code, problem_id)
+        return code, min_stop_index
