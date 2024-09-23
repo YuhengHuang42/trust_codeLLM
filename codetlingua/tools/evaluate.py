@@ -9,7 +9,7 @@ import numpy as np
 
 from termcolor import cprint
 from tqdm import tqdm
-from utils import (
+from utility.utils import (
     SUCCESS,
     check_correctness,
     estimate_pass_at_k,

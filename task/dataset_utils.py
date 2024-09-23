@@ -73,7 +73,7 @@ def find_all_substring_positions(original_string, sub_string):
     
     return positions
 
-def find_code_block_positions(original_string, sub_string):
+def find_code_block_positions(original_string, sub_string, filter_language=None):
     """
     Given original_string and sub_string, find all occurrences of the sub_string in original_string
     ---
@@ -81,11 +81,19 @@ def find_code_block_positions(original_string, sub_string):
         original_string: string
         sub_string: string
     Output:
-        List[Tuple]: list of start and end Line Number tuples. 
+        List[List]: list of matched Line number. 
     """
     # Split the original and sub string into lines
     original_lines = original_string.splitlines()
     sub_lines = sub_string.splitlines()
+    if filter_language is None:
+        cleaned_sub_lines = sub_lines
+    else:
+        cleaned_sub_lines = []
+        for line in sub_lines:
+            if utils.is_line_only_punctuators_pygments(line, filter_language):
+                continue
+            cleaned_sub_lines.append(line)
     
     # List to store all matching positions
     matches = []
@@ -93,25 +101,39 @@ def find_code_block_positions(original_string, sub_string):
     # Iterate over the original string lines
     for i in range(len(original_lines)):
         # Check if the current line matches the first line of the sub_string
-        if original_lines[i].strip() == sub_lines[0].strip():
+        recorded_line_number = []
+        if original_lines[i].strip() == cleaned_sub_lines[0].strip():
             # Assume it's a match, start checking the following lines
             match_found = True
-            for j in range(1, len(sub_lines)):
-                # If we go out of bounds of the original lines or a line doesn't match, set match_found to False
-                if i + j >= len(original_lines) or original_lines[i + j].strip() != sub_lines[j].strip():
+            start_index = i
+            j = 1
+            recorded_line_number.append(i)
+            while(j < len(cleaned_sub_lines)):
+                #for j in range(1, len(cleaned_sub_lines)):
+                # If we go out of bounds of the original lines, set match_found to False
+                if start_index + j >= len(original_lines):
                     match_found = False
                     break
+                elif original_lines[start_index + j].strip() != cleaned_sub_lines[j].strip():
+                    # We allow partial match. As long as the order is correct.
+                    #break
+                    start_index += 1
+                    continue
+                else:
+                    j += 1
+                    recorded_line_number.append(start_index + j)
             
             # If all lines matched, calculate the start and end positions in the original string
             if match_found:
-                start_pos = i
-                end_pos = i + len(sub_lines)
-                matches.append((start_pos, end_pos))
+                #start_pos = i
+                #end_pos = i + len(cleaned_sub_lines)
+                #matches.append((start_pos, end_pos))
+                matches.append(recorded_line_number)
     
     # Return the list of matched positions as tuples (start_line, end_line)
     return matches
 
-def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1):
+def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1, filter_language=None):
     """
     Collect all buggy positions according to raw_buggy_code
     ---
@@ -119,6 +141,7 @@ def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1
         original_code: str
         raw_buggy_code: str. Returned response from OPENAI.
         logging_idx: str. Used for reporting error and debugging
+        filter_language: str. Whether to filter out lines that only contain punctuators or comments. Set to target language to enable filtering.
     Output:
         List[Tuple]: list of start and end Line Number tuples.
     """
@@ -130,7 +153,7 @@ def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1
     if len(buggy_code_list) == 0:
         return result
     for buggy_code in buggy_code_list:
-        positions = find_code_block_positions(original_code, buggy_code)
+        positions = find_code_block_positions(original_code, buggy_code, filter_language) #  List[List]: list of matched Line number. 
         if len(positions) == 0:
             logger.error(f"No matching position find for {logging_idx}")
             logger.error(f"buggy_code: {buggy_code}")

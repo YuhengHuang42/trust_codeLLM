@@ -71,6 +71,7 @@ def exec_sample(
     completion_id: int,
     stat: Value,
     output_error_case: bool=False,
+    env: dict=None
 ):
     import shutil
 
@@ -149,7 +150,16 @@ def exec_sample(
             f.write(code)
         
         try:
-            subprocess.run(f"javac temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}/{problem['id']}.java", check=True, capture_output=True, shell=True, timeout=100)
+            if env is not None:
+                parameter = {"env": env}
+            else:
+                parameter = {}
+            subprocess.run(f"javac temp_dir/{problem['id']}-{problem['language']}-{target_lang}-{completion_id}/{problem['id']}.java", 
+                           check=True, 
+                           capture_output=True, 
+                           shell=True, 
+                           timeout=100,
+                           **parameter)
 
             test_io = problem['test_IO']
             for i in range(len(test_io)):
@@ -399,6 +409,7 @@ def untrusted_check(
     target_lang: str,
     completion_id: int,
     output_error_case: bool=False,
+    env: dict=None,
 ) -> Tuple[str, np.ndarray]:
 
     # shared memory objects
@@ -412,7 +423,8 @@ def untrusted_check(
             target_lang,
             completion_id,
             stat,
-            output_error_case
+            output_error_case,
+            env
         ),
     )
 

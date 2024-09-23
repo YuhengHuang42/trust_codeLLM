@@ -1,4 +1,4 @@
-import logger
+from loguru import logger
 import json
 import subprocess
 import os

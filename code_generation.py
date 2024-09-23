@@ -17,12 +17,17 @@ CODE_NOT_FOUND_FLAG = "NO_CODE"
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
 def evaluate(llm, tokenizer, dataset, generate_config, save_path):
     import utility.utils as utils
-    import task.dataset_utils as dataset_utils
     generate_config = copy.deepcopy(generate_config)
+    if "prompt" in generate_config:
+        system_prompt = generate_config.pop("prompt") + "\n    "
+    else:
+        system_prompt = ""
     ans_recored = shelve.open(str(save_path))
 
     for idx, item in enumerate(tqdm.tqdm(dataset)):
         input_str = dataset.get_prompt(idx)
+        input_str = system_prompt + input_str
+        input_str += "\n    "
         generate_result = utils.generate_and_record(
             llm,
             tokenizer,
@@ -30,7 +35,8 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path):
             generate_config=generate_config
         )
         # Evaluate the code
-        code, min_stop_index = dataset.postprocess(generate_result["str_all"], idx)
+        raw_but_no_special_token_ans = generate_result["str_output"]
+        code, min_stop_index = dataset.postprocess(input_str + raw_but_no_special_token_ans, idx)
         code_correctness = dataset.check_result(code, idx)
         generate_result["code_correctness"] = code_correctness
         generate_result["problem"] = {"prompt": input_str} 

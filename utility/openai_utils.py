@@ -52,6 +52,32 @@ public class Main {
 }
 ```\n\n'''
 
+GENERATION_SYSTEM_PROMPT = """Below is the code generated according to the instructions in the comment. Please help me identify which line(s) of code are wrong. You could use multiple blocks (enclosed by ``` ```) if it is a multi-chunk bug. Finally, please present a full runnable version corrected using minimal changes."""
+
+GENERATION_EXAMPLE_PROMPT = """\n\nExample Response Format:\n\n\
+The erroneous code block(s): 
+    
+```
+t = -1
+```
+
+
+```
+t += 1
+```
+
+The corrected version: 
+```
+from typing import List
+def sum_number(numbers):
+    t = 0
+    for i in range(numbers):
+        t += i
+    return t
+```\n\n"""
+
+
+
 def get_translation_error_prompt(source_lang, 
                                  target_lang,
                                  original_code,
@@ -64,10 +90,24 @@ def get_translation_error_prompt(source_lang,
     openai_system_input = openai_prompt + example_prompt
     openai_user_input = "Now here is the problem:\n\n" +\
     "Original code:\n\n" + original_code +\
-    "\n\nReference correct code:\n\n```{}```".format(gt_code) +\
+    "\n\nReference correct code:\n\n```\n{}\n```".format(gt_code) +\
     "\n\n**Translated code to be corrected**:\n\n" + generated_code +\
     "\n\nThe Error in the translated code: {}".format(code_result) +\
     "\n\nYour answer:\n"
+    message = {"system": openai_system_input, "user": openai_user_input}
+    return message
+
+def get_generation_error_prompt(generated_code,
+                                error_test_case=None,
+                                openai_prompt=GENERATION_SYSTEM_PROMPT,
+                                example_prompt=GENERATION_EXAMPLE_PROMPT
+                                ):
+    openai_system_input = openai_prompt + example_prompt
+    openai_user_input = "The code is:\n\n" +\
+    "```\n{}\n```\n\n".format(generated_code)
+    if error_test_case is not None:
+        openai_user_input += "The test cases that failed are: \n{}\n\n".format("".join(error_test_case))
+    openai_user_input += "Your answer:\n"
     message = {"system": openai_system_input, "user": openai_user_input}
     return message
 

@@ -188,7 +188,7 @@ def get_important_token_pos(important_line_info, data, tokenizer):
     Get the position idx of the important token given the important_line_info.
     ---
     Args:
-        important_line_info: dict. data_index -> line mapping
+        important_line_info: dict. data_index -> line mapping (List[List]) List of important target lines
         data: dict. data_index -> collected data mapping
         tokenizer: TokenizerFast. The tokenizer used in model inference.
     Output:
@@ -206,10 +206,10 @@ def get_important_token_pos(important_line_info, data, tokenizer):
         important_token_info[key] = list()
         tokenized_info = tokenizer(data[key]['str_output'], return_offsets_mapping=True, add_special_tokens=False)
         for item in single_info:
-            start_line_number = item[0]
-            end_line_number = item[1]
+            #start_line_number = item[0]
+            #end_line_number = item[1]
             cleaned_line_number = list()
-            for inner_line_idx in range(start_line_number, end_line_number):
+            for inner_line_idx in item:
                 if is_line_only_punctuators_pygments(split_response[inner_line_idx]):
                     continue
                 else:
@@ -235,6 +235,8 @@ def is_line_only_punctuators_pygments(line, language='c'):
         # Check if token is a punctuation or operator
         elif tok_type in Token.Punctuation:
             continue
+        elif tok_type in Token.Comment:
+            return True # Comment Line. Skip
         else:
             # Any other token type means the line contains more than punctuators
             return False
@@ -250,7 +252,7 @@ def obtain_topk_tokens_by_prob(data, candidate_tokens, key, topk, agg_method=np.
     for per_line in candidate_tokens:
         result.append(gen_probes[per_line])
     mean_result = [agg_method(i) for i in result]
-    rank_per_line = sorted(list(zip(mean_result, [i for i in range(len(mean_result))])))[:topk]
+    rank_per_line = sorted(list(zip(mean_result, [i for i in range(len(mean_result))])))[:topk] # From low to high
     selected_token = set()
     for line in rank_per_line:
         selected_token = selected_token.union(set(candidate_tokens[line[1]]))

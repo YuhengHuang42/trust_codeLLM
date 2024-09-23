@@ -2,12 +2,20 @@
 from .dataset_utils import CodeDataset
 from datasets import load_dataset
 from codetlingua.tools.utils import check_correctness, get_problem, untrusted_check
+import os
 
 class CodetlinguaDataset(CodeDataset):
-    def __init__(self, split, source_lang, target_lang):
+    def __init__(self, split, source_lang, target_lang, java_home=None):
         self.split = split
         self.source_lang = source_lang
         self.target_lang = target_lang
+        self.java_home = java_home
+        self.env = None
+        if java_home is not None:
+            self.env = os.environ.copy()
+            assert "bin" not in java_home
+            self.env["PATH"] = os.path.join(java_home, "bin") + os.pathsep + self.env["PATH"]
+            self.env["JAVA_HOME"] = java_home
         self.problems = CodetlinguaDataset.load_codetlingua(split, source_lang)
 
     @staticmethod
@@ -55,7 +63,8 @@ class CodetlinguaDataset(CodeDataset):
             generate_code,
             self.target_lang,
             completion_id,
-            output_error_case
+            output_error_case,
+            self.env
         )
         if result is None:
             result = "timeout" # Killed by untrusted_check because of timeout

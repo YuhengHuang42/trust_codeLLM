@@ -176,6 +176,24 @@ class HumanEval(Task):
         )
         return results
 
+
+def extract_assertions_from_humaneval(code_str):
+    # Use regex to extract all assertions
+    if "for" or "while" in code_str:
+        # Include loop and other logic in constructing test cases.
+        return [code_str]
+    func_name_pattern = r"check\((\w+)\)"
+    matches = re.findall(func_name_pattern, code_str)
+    func_name = matches[-1]
+    
+    assertion_pattern = r"(assert .*\n)"
+    assertions = re.findall(assertion_pattern, code_str)
+    
+    # Replace the "candidate" with the given function name
+    modified_assertions = [assertion.replace("candidate", func_name) for assertion in assertions]
+    
+    return modified_assertions
+    
 class HumanEvalDataset(CodeDataset):
     def __init__(self):
         self.task = HumanEval()
@@ -195,6 +213,28 @@ class HumanEvalDataset(CodeDataset):
         test_cases = self.task.get_reference(self.problems[problem_id])
         result = self.task.process_results([[generate_code]], [test_cases])
         return result
+    
+    def check_result_in_detail(self, generated_code, problem_id: int):
+        test_cases = self.task.get_reference(self.problems[problem_id])
+        test_cases = extract_assertions_from_humaneval(test_cases)
+        
+        results, detail = self.task.code_metric.compute(
+            references=test_cases,
+            predictions=[[generated_code] for i in range(len(test_cases))],
+            num_workers=1,
+            timeout=3 # https://huggingface.co/spaces/evaluate-metric/code_eval
+        )
+        
+        failed_test_case = []
+        for key in detail:
+            if detail[key][0][1]['passed'] == True:
+                continue
+            else:
+                failed_test_case.append(test_cases[key])
+        
+        return results, failed_test_case
+        #return score + results["pass@1"] / 2
+        #return result
     
     def postprocess(self, generate_code, problem_id):
         code, min_stop_index = self.task.postprocess_generation(generate_code, problem_id)
