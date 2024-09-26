@@ -27,6 +27,9 @@ _CITATION = """
 
 from abc import ABC, abstractmethod
 from warnings import warn
+from pygments import lex
+from pygments.lexers import PythonLexer
+from pygments.token import Keyword, Name
 
 from datasets import load_dataset
 from .dataset_utils import CodeDataset
@@ -179,9 +182,11 @@ class HumanEval(Task):
 
 def extract_assertions_from_humaneval(code_str):
     # Use regex to extract all assertions
-    if "for" or "while" in code_str:
+    tokens = lex(code_str, PythonLexer())
+    for token, value in tokens:
         # Include loop and other logic in constructing test cases.
-        return [code_str]
+        if token in [Keyword] and value in ['for', 'while']:
+            return [code_str]
     func_name_pattern = r"check\((\w+)\)"
     matches = re.findall(func_name_pattern, code_str)
     func_name = matches[-1]
@@ -232,7 +237,7 @@ class HumanEvalDataset(CodeDataset):
             else:
                 failed_test_case.append(test_cases[key])
         
-        return results, failed_test_case
+        return results, failed_test_case, detail
         #return score + results["pass@1"] / 2
         #return result
     

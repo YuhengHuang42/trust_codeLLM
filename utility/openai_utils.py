@@ -52,29 +52,31 @@ public class Main {
 }
 ```\n\n'''
 
-GENERATION_SYSTEM_PROMPT = """Below is the code generated according to the instructions in the comment. Please help me identify which line(s) of code are wrong. You could use multiple blocks (enclosed by ``` ```) if it is a multi-chunk bug. Finally, please present a full runnable version corrected using minimal changes."""
+GENERATION_SYSTEM_PROMPT = """Below is the code generated according to the instructions in the comment. The comment is ground truth and the code is inconsistent to the instructions. Do not modify comment. Please help me identify which line(s) of code are wrong. You could use multiple blocks (enclosed by ``` ```) if it is a multi-chunk bug. Finally, please present a full runnable corrected version based on the bugs you find."""
 
-GENERATION_EXAMPLE_PROMPT = """\n\nExample Response Format:\n\n\
+GENERATION_EXAMPLE_PROMPT = '''\n\nExample Response Format:\n\n\
 The erroneous code block(s): 
     
 ```
-t = -1
+even = [i for i in l if i % 2 == 0]
+odd = [i for i in l if i % 2!= 0]
+return sorted(even) + sorted(odd)
 ```
 
 
 ```
-t += 1
+even = 1
+odd = 2
 ```
 
 The corrected version: 
 ```
 from typing import List
-def sum_number(numbers):
-    t = 0
-    for i in range(numbers):
-        t += i
-    return t
-```\n\n"""
+def sort_even(l: list):
+    even = [l[i] for i in range(len(l)) if i % 2 == 0]
+    even.sort()
+    return [even[i // 2] if i % 2 == 0 else l[i] for i in range(len(l))]
+```\n\n'''
 
 
 

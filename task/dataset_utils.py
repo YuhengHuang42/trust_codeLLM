@@ -120,8 +120,8 @@ def find_code_block_positions(original_string, sub_string, filter_language=None)
                     start_index += 1
                     continue
                 else:
-                    j += 1
                     recorded_line_number.append(start_index + j)
+                    j += 1
             
             # If all lines matched, calculate the start and end positions in the original string
             if match_found:
@@ -161,7 +161,7 @@ def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1
         result += positions
     return result
 
-def get_candidate_tokens(data, key, tokenizer, lang):
+def get_candidate_tokens(data, key, tokenizer, lang, code_blocks_info=None):
     """
     Get candidate tokens per line.
     Use is_line_only_punctuators_pygments to filter out lines that only contain punctuators.
@@ -171,15 +171,17 @@ def get_candidate_tokens(data, key, tokenizer, lang):
         key: str. data_index
         tokenizer: TokenizerFast. The tokenizer used in model inference.
         lang: str. The language of the code block.
+        code_blocks_info: List[List]. List of code block start and end char positions. Set to [[0, len(data[key]["str_output"])]] to skip extraction.
     Output:
         candidate_tokens: List[List]: List of token idx. Each list corresponds to a line in the code block.
     """
-    code_blocks, code_blocks_info = utils.extract_code_block(data[key]['str_output'])
-    line_char_mapping = utils.get_line_to_char_index_mapping(data[key]['str_output'])
+    if code_blocks_info is None:
+        code_blocks, code_blocks_info = utils.extract_code_block(data[key]['str_output'])
 
     target_code_block_info = code_blocks_info[-1] # The last code enclosed by ``` ```.
     tokenized_info = tokenizer(data[key]['str_output'], return_offsets_mapping=True, add_special_tokens=False)
 
+    line_char_mapping = utils.get_line_to_char_index_mapping(data[key]['str_output'])
     line_num = len(line_char_mapping)
     split_response = data[key]['str_output'].splitlines()
     # Find the start position of the code block
@@ -191,6 +193,7 @@ def get_candidate_tokens(data, key, tokenizer, lang):
             break
 
     # Find the end position of the code block
+    end_line = line_num
     for idx in range(start_line, line_num):
         if line_char_mapping[idx][0] < target_code_block_info[1]:
             continue

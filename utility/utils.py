@@ -8,6 +8,7 @@ import shelve
 from pygments.lexers import get_lexer_by_name
 from pygments.token import Token
 import numpy as np
+import difflib
   
 def identify_start_end_substr(original_tokens, target_str, tokenizer):
     """
@@ -90,12 +91,13 @@ def load_tokenizer(model_name, model_path=None):
         tokenizer = AutoTokenizer.from_pretrained(model_name)
     return tokenizer
 
-def load_opensource_model(model_name, parallel=True, quantization=None, model_path=None):
+def load_opensource_model(model_name, parallel=True, quantization=None, model_path=None, cache_dir=None):
     if parallel:
         args = {"device_map": "auto"}
     else:
         args = {}
-    
+    if cache_dir is not None:
+        args["cache_dir"] = cache_dir
     assert quantization in [None, "8bit", "4bit"]
     if quantization == "4bit":
         quantization_config = BitsAndBytesConfig(
@@ -259,6 +261,7 @@ def obtain_topk_tokens_by_prob(data, candidate_tokens, key, topk, agg_method=np.
     return selected_token
 
 def load_shelve(path):
+    path = str(path)
     with shelve.open(path) as db:
         loaded_data = dict(db)
     return loaded_data
@@ -270,6 +273,7 @@ def load_shelve_and_resume(dir_path):
     saved count using len(loaded_data) and return the next index
     to resume.
     """
+    dir_path = str(dir_path)
     # Get list of all shelve files in the directory
     shelve_files = [f for f in os.listdir(dir_path) if f.endswith('.db') or f.endswith('.dat')]
 
@@ -334,3 +338,135 @@ def extract_code_block(text, select_idx=None):
         return code_blocks[select_idx], code_blocks_info[select_idx]
     else:
         return None, None  # Return None if select_idx is out of bounds
+    
+
+def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg):
+    """
+    Collect features as hallucination detection mentioned in the paper.
+    ---
+    Args:
+        attn_snapshot: Tuple[Tensor]. Each layer's multi-head attention map, 
+            which has the shape [1, head_num, token_num, token_num]. It should be the full input version.
+        layer: int. The index of the selected layer as feature.
+        input_token_length: int. The token length of the input prompt.
+        output_seg: List[List]: List of segment tokens. It should be str_output version
+    Return:
+        vt: torch.tensor. vt in the paper with the shape [multi_head_num]
+    """
+    
+    al_context = attn_snapshot[layer][0][:, -1, :input_token_length]
+    al_context = torch.mean(al_context, dim=-1)
+    al_result = list()
+    for seg in output_seg:
+        real_seg = [i + input_token_length for i in seg]
+        attn_seg = attn_snapshot[layer][0][:, -1, real_seg]
+        al_attn_score = torch.mean(attn_seg, dim=-1)
+        al_attn_score = al_context / (al_context + al_attn_score)
+        al_result.append(al_attn_score)
+    #al_new = attn_snapshot[layer][0][:, -1, input_token_length:]
+    #al_new = torch.mean(al_new, dim=-1)
+    
+    #lr = al_context / (al_context + al_new)
+    #return lr
+    return al_result
+
+def label_seg(gt_seg, output_seg):
+    """
+    Label segmentation as 1 if any tokens are presented in gt_seg.
+    ---
+    Args:
+        gt_seg: List[List]
+        output_seg: List[List]
+    Output:
+        List[Bool]
+    """
+    result = [0 for i in range(len(output_seg))]
+    g_set = []
+    for seg in gt_seg:
+        g_set += seg
+    g_set = set(g_set)
+    for idx, o_seg in enumerate(output_seg):
+        if len(set(o_seg).intersection(g_set)) > 0:
+            result[idx] = 1
+    return result
+
+
+
+def normalize_code(code, language):
+    """
+    Remove trailing comments from code lines.
+    ---
+    Args:
+        code: string. Raw code string.
+        language: string. Type of programming language.
+    Return:
+        string. Code string without comments.
+    """
+    
+    lexer = get_lexer_by_name(language)
+    tokens = lexer.get_tokens(code)
+    # When the whole line is a comment
+    # This filter will leave one single \n
+    filtered_code = ''.join(token_value for token_type, token_value in tokens if token_type not in Token.Comment)
+
+    filtered_code = filtered_code.splitlines(keepends=True)
+    filtered_code = [i.strip() for i in filtered_code]
+    return filtered_code
+
+# Function to identify changes and record positions in code_b
+def get_changes_with_line_numbers(gt_code, generated_code, language):
+    '''
+    # Example usage
+    code_a = """def foo():
+        print("Hello")
+        print("hi")
+        #....
+        return 1
+    """
+
+    code_b = """def foo(s):
+        #....
+        print("Hello")
+        #....
+        return 1
+    """
+    Return --> [Line 0], [Line 0, Line 4] --> [Line 0, Line 4]
+    '''
+    code_a_lines = normalize_code(gt_code, language)
+    code_b_lines = normalize_code(generated_code, language)
+
+    # Use ndiff to compare and track changes
+    diff = list(difflib.ndiff(code_a_lines, code_b_lines))
+
+    changes_in_b = []  # Changes recorded with line numbers in code_b
+    missing_from_b = []  # Lines deleted from code_a and their expected positions in code_b
+    a_line_num = 0  # Line number tracker for code_a
+    b_line_num = 0  # Line number tracker for code_b
+
+    for i, line in enumerate(diff):
+        if line.startswith(' '):  # Unchanged lines
+            a_line_num += 1
+            b_line_num += 1
+        elif line.startswith('-'):  # Deletion from code_a (missing in code_b)
+            if len(code_b_lines[b_line_num]) == 0:
+                if b_line_num + 1 >= len(code_b_lines):
+                    for j in range(b_line_num, 0, -1):
+                        if len(code_b_lines[j]) > 0:
+                            b_line_num = j
+                            missing_from_b.append((b_line_num, line[2:]))  
+                            break
+                    break
+                b_line_num += 1 # The current b_line_num is empty, skip it
+            missing_from_b.append((b_line_num, line[2:]))  # Record 0-based expected line number in code_b
+            a_line_num += 1
+        elif line.startswith('+'):  # Addition in code_b
+            if len(code_b_lines[b_line_num]) == 0:
+                # Addition in Comment type is ignored.
+                b_line_num += 1
+                continue
+            changes_in_b.append((b_line_num, line[2:]))  # Record 0-based line number in code_b
+            b_line_num += 1
+        if a_line_num >= len(code_a_lines) or b_line_num >= len(code_b_lines):
+            break
+
+    return changes_in_b, missing_from_b
