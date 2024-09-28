@@ -58,6 +58,10 @@ def main(
 
     if "HF_HOME" in config_dict["system_setting"]:
         os.environ["HF_HOME"] = config_dict["system_setting"]["HF_HOME"]
+    if "cache_dir" in config_dict["system_setting"]:
+        cache_dir = config_dict["system_setting"]["cache_dir"]
+    else:
+        cache_dir = None
     import utility.utils as utils
     from task.defect4j import Defects4jDataset
     data_path = config_dict["task_config"]["repair_data_path"]
@@ -70,7 +74,7 @@ def main(
     model_name = config_dict["llm_config"]["model_name"]
     quantization = config_dict["llm_config"]["quantization"]
     generate_config = config_dict["llm_config"]["generate_config"]
-    model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization)
+    model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
     
     if task == "defects4j":
         assert "split" in config_dict["task_config"]

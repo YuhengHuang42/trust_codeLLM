@@ -9,6 +9,7 @@ from pygments.lexers import get_lexer_by_name
 from pygments.token import Token
 import numpy as np
 import difflib
+from loguru import logger
   
 def identify_start_end_substr(original_tokens, target_str, tokenizer):
     """
@@ -91,11 +92,13 @@ def load_tokenizer(model_name, model_path=None):
         tokenizer = AutoTokenizer.from_pretrained(model_name)
     return tokenizer
 
-def load_opensource_model(model_name, parallel=True, quantization=None, model_path=None, cache_dir=None):
+def load_opensource_model(model_name, parallel=True, quantization=None, model_path=None, cache_dir=None, user_args=None):
     if parallel:
         args = {"device_map": "auto"}
     else:
         args = {}
+    if user_args is not None:
+        args.update(user_args)
     if cache_dir is not None:
         args["cache_dir"] = cache_dir
     assert quantization in [None, "8bit", "4bit"]
@@ -185,6 +188,7 @@ def get_line_to_char_index_mapping(text):
     
     return index_mapping
 
+
 def get_important_token_pos(important_line_info, data, tokenizer):
     """
     Get the position idx of the important token given the important_line_info.
@@ -206,7 +210,10 @@ def get_important_token_pos(important_line_info, data, tokenizer):
         line_char_mapping = get_line_to_char_index_mapping(data[key]['str_output'])
         target_buggy_positions[key] = list()
         important_token_info[key] = list()
-        tokenized_info = tokenizer(data[key]['str_output'], return_offsets_mapping=True, add_special_tokens=False)
+        #tokenized_info = tokenizer(data[key]['str_output'], return_offsets_mapping=True, add_special_tokens=False)
+        #tokenized_info_start_idx = remove_redundant_tuples(tokenized_info["offset_mapping"])
+        #offset_mapping = tokenized_info["offset_mapping"][tokenized_info_start_idx:]
+        tokenized_info = ModelOutputCleaner.clean_first_tokenization(data[key]['str_output'], tokenizer)
         for item in single_info:
             #start_line_number = item[0]
             #end_line_number = item[1]
@@ -340,7 +347,7 @@ def extract_code_block(text, select_idx=None):
         return None, None  # Return None if select_idx is out of bounds
     
 
-def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg):
+def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, numeric_stability=1e-7):
     """
     Collect features as hallucination detection mentioned in the paper.
     ---
@@ -361,7 +368,7 @@ def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg):
         real_seg = [i + input_token_length for i in seg]
         attn_seg = attn_snapshot[layer][0][:, -1, real_seg]
         al_attn_score = torch.mean(attn_seg, dim=-1)
-        al_attn_score = al_context / (al_context + al_attn_score)
+        al_attn_score = al_context / (al_context + al_attn_score + numeric_stability)
         al_result.append(al_attn_score)
     #al_new = attn_snapshot[layer][0][:, -1, input_token_length:]
     #al_new = torch.mean(al_new, dim=-1)
@@ -407,11 +414,23 @@ def normalize_code(code, language):
     tokens = lexer.get_tokens(code)
     # When the whole line is a comment
     # This filter will leave one single \n
-    filtered_code = ''.join(token_value for token_type, token_value in tokens if token_type not in Token.Comment)
-
+    filtered_code = []
+    for token_type, token_value in tokens:
+        if token_type not in Token.Comment:
+            filtered_code.append(token_value)
+        else:
+            for i in range(len(token_value.splitlines())-1):
+                filtered_code.append("\n")
+    #filtered_code = ''.join(token_value for token_type, token_value in tokens if token_type not in Token.Comment)
+    filtered_code = "".join(filtered_code)
     filtered_code = filtered_code.splitlines(keepends=True)
-    filtered_code = [i.strip() for i in filtered_code]
-    return filtered_code
+    result = list()
+    for line in filtered_code:
+        if is_line_only_punctuators_pygments(line, language):
+            result.append("")
+        else:
+            result.append(line.strip())
+    return result
 
 # Function to identify changes and record positions in code_b
 def get_changes_with_line_numbers(gt_code, generated_code, language):
@@ -440,33 +459,94 @@ def get_changes_with_line_numbers(gt_code, generated_code, language):
 
     changes_in_b = []  # Changes recorded with line numbers in code_b
     missing_from_b = []  # Lines deleted from code_a and their expected positions in code_b
-    a_line_num = 0  # Line number tracker for code_a
+    #a_line_num = 0  # Line number tracker for code_a
     b_line_num = 0  # Line number tracker for code_b
-
     for i, line in enumerate(diff):
         if line.startswith(' '):  # Unchanged lines
-            a_line_num += 1
+            #a_line_num += 1
             b_line_num += 1
         elif line.startswith('-'):  # Deletion from code_a (missing in code_b)
+            # The current b_line_num is empty, skip it
+            if len(line[2:]) == 0:
+                continue
+            break_flag = False
+            if b_line_num >= len(code_b_lines):
+                b_line_num = len(code_b_lines) - 1
+                break_flag = True
+            b_line_num_shifted = b_line_num
             if len(code_b_lines[b_line_num]) == 0:
-                if b_line_num + 1 >= len(code_b_lines):
-                    for j in range(b_line_num, 0, -1):
+                temp_continue_flag = False
+                for j in range(b_line_num+1, len(code_b_lines)):
+                    b_line_num_shifted = j
+                    if len(code_b_lines[j]) > 0:
+                        missing_from_b.append((b_line_num_shifted, line[2:]))
+                        temp_continue_flag = True  
+                        break
+                if (not temp_continue_flag) and (b_line_num_shifted + 1 >= len(code_b_lines)):
+                    # Search from the bottom of the code_b to find the last non-empty line
+                    for j in range(b_line_num_shifted, 0, -1):
                         if len(code_b_lines[j]) > 0:
-                            b_line_num = j
-                            missing_from_b.append((b_line_num, line[2:]))  
+                            b_line_num_shifted = j
+                            missing_from_b.append((b_line_num_shifted, line[2:]))  
                             break
                     break
-                b_line_num += 1 # The current b_line_num is empty, skip it
-            missing_from_b.append((b_line_num, line[2:]))  # Record 0-based expected line number in code_b
-            a_line_num += 1
+                if break_flag == True:
+                    break
+            else:
+                missing_from_b.append((b_line_num, line[2:]))  # Record 0-based expected line number in code_b
+                #a_line_num += 1
         elif line.startswith('+'):  # Addition in code_b
             if len(code_b_lines[b_line_num]) == 0:
                 # Addition in Comment type is ignored.
+                #print(line, b_line_num)
                 b_line_num += 1
-                continue
-            changes_in_b.append((b_line_num, line[2:]))  # Record 0-based line number in code_b
-            b_line_num += 1
-        if a_line_num >= len(code_a_lines) or b_line_num >= len(code_b_lines):
-            break
+            else:
+                #print(line, b_line_num)
+                changes_in_b.append((b_line_num, line[2:]))  # Record 0-based line number in code_b
+                b_line_num += 1
+        #if b_line_num >= len(code_b_lines):
+        #    break
 
     return changes_in_b, missing_from_b
+
+class ModelOutputCleaner:
+    def __init__(self, start_token, model_type):
+        self.start_token = start_token
+        self.model_type = model_type
+    
+    def forward(self, str_output):
+        if "llama" in self.model_type.lower():
+            # We only need to deal with start token
+            # Bcause this class is used for cleanning model output
+            # for one single inference, which is used to
+            # extract hidden states and attention scores.
+            return str_output.replace(self.start_token, "")
+        else:
+            raise NotImplementedError
+    
+    @staticmethod
+    def clean_first_tokenization(str_output, tokenizer):
+        def remove_redundant_tuples(input_list):
+            # Check how many initial (0, 1) tuples are present
+            # This is used to deal with https://github.com/huggingface/transformers/issues/26273
+            count = 0
+            for item in input_list:
+                if item == (0, 1):
+                    count += 1
+                else:
+                    break
+
+            # Remove redundant (0, 1) tuples, keep only one if there are multiple
+            start_idx = max(count - 1, 0)
+            #if count > 1:
+            #    input_list = input_list[count - 1:]
+
+            return start_idx
+        
+        tokenized_info = tokenizer(str_output, return_offsets_mapping=True, add_special_tokens=False)
+        tokenized_info_start_idx = remove_redundant_tuples(tokenized_info["offset_mapping"])
+        offset_mapping = tokenized_info["offset_mapping"][tokenized_info_start_idx:]
+        input_ids = tokenized_info["input_ids"][tokenized_info_start_idx:]
+        attention_mask = tokenized_info["attention_mask"][tokenized_info_start_idx:]
+        result = {"input_ids": input_ids, "attention_mask": attention_mask, "offset_mapping": offset_mapping}
+        return result
