@@ -92,11 +92,19 @@ def load_tokenizer(model_name, model_path=None):
         tokenizer = AutoTokenizer.from_pretrained(model_name)
     return tokenizer
 
-def load_opensource_model(model_name, parallel=True, quantization=None, model_path=None, cache_dir=None, user_args=None):
+def load_opensource_model(model_name, 
+                          parallel=True, 
+                          quantization=None, 
+                          model_path=None, 
+                          cache_dir=None, 
+                          user_args=None, 
+                          device_map=None):
     if parallel:
         args = {"device_map": "auto"}
     else:
-        args = {}
+        args = {"device_map": "cpu"}
+    if device_map is not None:
+        args["device_map"] = device_map
     if user_args is not None:
         args.update(user_args)
     if cache_dir is not None:
@@ -105,7 +113,7 @@ def load_opensource_model(model_name, parallel=True, quantization=None, model_pa
     if quantization == "4bit":
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16
+            bnb_4bit_compute_dtype=torch.float16,
             #load_in_8bit=True,
             #bnb_8bit_compute_dtype=torch.float16
         )
@@ -550,3 +558,4 @@ class ModelOutputCleaner:
         attention_mask = tokenized_info["attention_mask"][tokenized_info_start_idx:]
         result = {"input_ids": input_ids, "attention_mask": attention_mask, "offset_mapping": offset_mapping}
         return result
+

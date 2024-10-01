@@ -180,7 +180,7 @@ def get_candidate_tokens(data, key, tokenizer, lang, code_blocks_info=None):
         code_blocks, code_blocks_info = utils.extract_code_block(data[key]['str_output'])
 
     target_code_block_info = code_blocks_info[-1] # The last code enclosed by ``` ```.
-    #tokenized_info = tokenizer(data[key]['str_output'], return_offsets_mapping=True, add_special_tokens=False)
+    #tokenized_info = tokenizer(data[key]['str_output'], loggru=True, add_special_tokens=False)
     #tokenized_info_start_idx = utils.remove_redundant_tuples(tokenized_info["offset_mapping"])
     #offset_mapping = tokenized_info["offset_mapping"][tokenized_info_start_idx:]
     tokenized_info = utils.ModelOutputCleaner.clean_first_tokenization(data[key]['str_output'], tokenizer)
