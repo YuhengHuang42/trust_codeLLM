@@ -84,8 +84,12 @@ def find_code_block_positions(original_string, sub_string, filter_language=None)
         List[List]: list of matched Line number. 
     """
     # Split the original and sub string into lines
-    original_lines = original_string.splitlines()
-    sub_lines = sub_string.splitlines()
+    if filter_language is not None:
+        original_lines = utils.normalize_code(original_string, filter_language)
+        sub_lines = utils.normalize_code(sub_string, filter_language)
+    else:
+        original_lines = original_string.splitlines()
+        sub_lines = sub_string.splitlines()
     if filter_language is None:
         cleaned_sub_lines = sub_lines
     else:
@@ -97,6 +101,8 @@ def find_code_block_positions(original_string, sub_string, filter_language=None)
     
     # List to store all matching positions
     matches = []
+    if len(cleaned_sub_lines) == 0:
+        return matches
     
     # Iterate over the original string lines
     for i in range(len(original_lines)):
@@ -148,11 +154,13 @@ def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1
     # The last one is the fully runnable code
     # The second-last one is the text description
     code_block, code_block_info = utils.extract_code_block(raw_buggy_code, None)
-    buggy_code_list = code_block[:-2]
+    buggy_code_list = code_block[:-2] # Skip the Indicator and runnable code.
     result = list()
     if len(buggy_code_list) == 0:
         return result
     for buggy_code in buggy_code_list:
+        if len(buggy_code.strip()) == 0:
+            continue
         positions = find_code_block_positions(original_code, buggy_code, filter_language) #  List[List]: list of matched Line number. 
         if len(positions) == 0:
             logger.error(f"No matching position find for {logging_idx}")

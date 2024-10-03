@@ -212,7 +212,7 @@ class HumanEvalDataset(CodeDataset):
     
     def get_prompt(self, problem_id):
         prompt = self.task.get_prompt(self.problems[problem_id])
-        return prompt
+        return prompt + "\n    "
     
     def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
         test_cases = self.task.get_reference(self.problems[problem_id])

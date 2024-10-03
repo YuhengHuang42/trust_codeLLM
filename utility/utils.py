@@ -64,7 +64,7 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
         generate_config["output_logits"] = True
     with torch.inference_mode():
         output = llm.generate(
-            inputs["input_ids"],
+            **inputs,
             pad_token_id=tokenizer.eos_token_id,
             **generate_config
         )
@@ -334,7 +334,7 @@ def extract_code_block(text, select_idx=None):
         code_start = text.find("\n", start_idx + 3) + 1  # Find the start of the next line after the opening ```
         #print(code_start)
         #print(end_idx)
-        code_block = text[code_start:end_idx].strip()
+        code_block = text[code_start:end_idx]#.strip()
         
 
         # Update the start position to search for the next code block
@@ -349,7 +349,7 @@ def extract_code_block(text, select_idx=None):
         return code_blocks, code_blocks_info  # Return all matches if no specific index is requested
 
     # Return specific match if select_idx is provided and within range
-    if 0 <= select_idx < len(code_blocks):
+    if select_idx < len(code_blocks):
         return code_blocks[select_idx], code_blocks_info[select_idx]
     else:
         return None, None  # Return None if select_idx is out of bounds
@@ -559,3 +559,13 @@ class ModelOutputCleaner:
         result = {"input_ids": input_ids, "attention_mask": attention_mask, "offset_mapping": offset_mapping}
         return result
 
+
+import ast
+
+def extract_top_level_function_names(code):
+    function_names = []
+    tree = ast.parse(code)
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.FunctionDef):
+            function_names.append(node.name)
+    return function_names

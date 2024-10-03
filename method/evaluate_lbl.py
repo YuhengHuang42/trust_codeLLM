@@ -54,11 +54,16 @@ def evaluate_lbl(data,
                  score=0,
                  counter=0,
                  topk=5,
-                 max_profile_token_length=4096):
+                 max_profile_token_length=4096,
+                 extract_code=True):
     oom_keys = []
     result = dict()
     for key in tqdm.tqdm(key_list):
-        candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=[[0, len(data[key]["str_output"])]])
+        if extract_code:
+            code_blocks_info = None
+        else:
+            code_blocks_info = [[0, len(data[key]["str_output"])]]
+        candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
         token_length = len(data[key]['token_output'])
         tail_truncate = 0
         input_token_length = data[key]['input_length']
@@ -118,6 +123,8 @@ def main(
     language = config_dict["task_config"]["language"]
     lbl_model_path = config_dict["task_config"]["lbl_model_path"]
     max_profile_token_length = config_dict["task_config"]["max_profile_token_length"]
+    extract_code = config_dict["task_config"]["extract_code"]
+    
     cache_dir = None
     if "HF_HOME" in config_dict["system_setting"]:
         os.environ["HF_HOME"] = config_dict["system_setting"]["HF_HOME"]
@@ -152,6 +159,8 @@ def main(
     target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
     evaluate_key_list = []
     for key in data:
+        if key not in error_line_info:
+            continue
         if data[key]["code_correctness"] == 'correct':
             continue
         if len(error_line_info[key][0]) == 0:
@@ -171,10 +180,11 @@ def main(
                                                         lbl_model, 
                                                         language, 
                                                         attn_layer,
-                                                        max_profile_token_length=max_profile_token_length
+                                                        max_profile_token_length=max_profile_token_length,
+                                                        extract_code=extract_code
                                                         )
     
-    
+    second_result = dict()
     if len(oom_keys) > 0:
         logger.info("Begin fallback inference for OOM data points")
         del recorder
@@ -193,7 +203,8 @@ def main(
                                                             attn_layer,
                                                             score=score,
                                                             counter=counter,
-                                                            max_profile_token_length=max_profile_token_length
+                                                            max_profile_token_length=max_profile_token_length,
+                                                            extract_code=extract_code
                                                             )
         if len(oom_keys) > 0:
             logger.error("OOM error still exists after fallback inference. Ignore them.")
@@ -208,7 +219,11 @@ def main(
         for key in result:
             pred_result = result[key]
             rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk_iter]
-            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=[[0, len(data[key]["str_output"])]])
+            if extract_code:
+                code_blocks_info = None
+            else:
+                code_blocks_info = [[0, len(data[key]["str_output"])]]
+            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
             selected_token = set()
             for line in rank_per_line:
                 selected_token = selected_token.union(set(candidate_tokens[line[1]]))

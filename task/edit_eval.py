@@ -14,8 +14,105 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .dataset_utils import CodeDataset
+from utility import utils
 
 CODE_MARKER = r"{{Code}}"
+
+PROMPT_TEMPLATE = """The following instructions describe a specific task, accompanied by the original code for reference. Please edit the code to complete the given task. Enclose your modified code within triple backticks (```).
+Example:
+Instruction: Change data structure of a from List to Dict.
+Original Code:
+```
+a = list()
+b = 1
+```
+Your response:
+```
+a = dict()
+b = 1
+```
+Now the instruction is: {}
+Original Code:
+```
+{}
+```
+Your response:\n\n"""
+
+class EditEvalDataset(CodeDataset):
+    def __init__(self,
+                 file_path,
+                 timeout=6,
+                 n_workers=4):
+        self.file_path = file_path
+        self.problems = read_problems(file_path)
+        self.index = sorted(list(self.problems.keys()), key=lambda x: int(x.split('/')[1]))
+        self.timeout = timeout
+        self.n_workers = n_workers
+    
+    
+    def __getitem__(self, i):
+        return self.problems[self.index[i]]
+
+    def __len__(self):
+        return len(self.problems)
+    
+    def get_ready_for_context(self, generate_code, problem_id):
+        task_id = self.index[problem_id]
+        problem_metadata = {"test": self.problems[task_id]["test"]}
+        if "context" in self.problems[task_id]:
+            problem_metadata['context'] = self.problems[task_id]['context']
+        check_program = build_program_and_tests(problem_metadata, generate_code)
+        return check_program
+        
+    def check_result_single(self, generate_code, problem_id: int):
+        task_id = self.index[problem_id]
+        #problem_metadata = {"test": self.problems[task_id]["test"]}
+        #if "context" in self.problems[task_id]:
+        #    problem_metadata['context'] = self.problems[task_id]['context']
+        #check_program = build_program_and_tests(problem_metadata, generate_code)
+        check_program = self.get_ready_for_context(generate_code, problem_id)
+        args = (self.problems[task_id], check_program, self.timeout, problem_id)
+        
+        
+        with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
+            future = executor.submit(check_correctness, *args)
+            result = future.result()
+        
+        
+        
+        return result
+    
+    def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False, replace_func_name_attempt=True):
+        result = self.check_result_single(generate_code, problem_id)
+        if replace_func_name_attempt:
+            if "is not defined" in result['result']:
+                generaed_func_names = utils.extract_top_level_function_names(generate_code)
+                gt_code = self.problems[self.index[problem_id]]['output']
+                gt_program = self.get_ready_for_context(gt_code, problem_id)
+                gt_func_names = utils.extract_top_level_function_names(gt_program)
+                if "check" in gt_func_names:
+                    gt_func_names.remove("check")
+                if len(gt_func_names) >= 2:
+                    # We do not attempt to replace function names if there are more than 2 functions in the ground truth code.
+                    return result
+                for func_name in generaed_func_names:
+                    new_code = generate_code.replace(func_name, gt_func_names[0])
+                    new_result = self.check_result_single(new_code, problem_id)
+                    if "is not defined" not in new_result['result']:
+                        return new_result
+        return result
+    
+    def get_prompt(self, problem_id: int):
+        # file_name: 'Chart-1.java'
+        instruction = self.problems[self.index[problem_id]]['instruction']
+        code = self.problems[self.index[problem_id]]['input']
+        return_prompt = PROMPT_TEMPLATE.format(instruction, code)
+        return return_prompt
+
+    def postprocess(self, generate_code, problem_id=None):
+        code_block, code_block_info = utils.extract_code_block(generate_code, -1)
+        return code_block, code_block_info
+    
 
 def read_problems(evalset_file: str) -> Dict[str, Dict]:
     dataset = {task["task_id"]: task for task in stream_jsonl(evalset_file)}
@@ -51,42 +148,6 @@ def build_program_and_tests(problem, code):
         # f"check({problem['entry_point']})"
         f"check()"
     ).strip()
-
-class EditEval(CodeDataset):
-    def __init__(self,
-                 file_path,
-                 timeout=6,
-                 n_workers=4):
-        self.file_path = file_path
-        self.problems = read_problems(file_path)
-        self.index = sorted(list(self.problems.keys()), key=lambda x: int(x.split('/')[1]))
-        self.timeout = timeout
-        self.n_workers = n_workers
-    
-    
-    def __getitem__(self, i):
-        return self.problems[self.index[i]]
-
-    def __len__(self):
-        return len(self.problems)
-    
-    def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
-        task_id = self.index[problem_id]
-        problem_metadata = {"test": self.problems[task_id]["test"]}
-        if "context" in self.problems[task_id]:
-            problem_metadata['context'] = self.problems[task_id]['context']
-        check_program = build_program_and_tests(problem_metadata, generate_code)
-        print(check_program)
-        args = (self.problems[task_id], check_program, self.timeout, problem_id)
-        
-        
-        with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
-            future = executor.submit(check_correctness, *args)
-            result = future.result()
-        
-        return result
-    
-    
 
 def check_correctness(problem: Dict, code: str, timeout: float,
                       run_id: Optional[int] = None) -> Dict:
@@ -304,3 +365,48 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
     sys.modules['resource'] = None
     sys.modules['psutil'] = None
     sys.modules['tkinter'] = None
+
+
+import re
+
+'''
+ground_truth_indentation = detect_indentation_level(dataset[int(idx)]['output'])
+code = align_indentation(code, ground_truth_indentation)
+'''
+
+def detect_indentation_level(code):
+    """Detect the indentation level of the first non-empty line in the given code snippet."""
+    lines = code.splitlines()
+    for line in lines:
+        if line.strip():  # Find the first non-empty line
+            match = re.match(r"(\s+)", line)
+            if match:
+                return match.group(1)  # Return the leading whitespace as indentation
+            else:
+                return ""
+    return ""  # All lines are empty or no indentation
+
+def align_indentation(target_code, ground_truth_indentation):
+    """Align the indentation of the target code to match the ground truth indentation level."""
+    lines = target_code.splitlines()
+    aligned_lines = []
+
+    base_indentation = detect_indentation_level(target_code)
+    if base_indentation:
+        base_indentation_level = len(base_indentation)
+    else:
+        base_indentation_level = 0
+
+    for line in lines:
+        stripped_line = line.lstrip()
+        current_indentation = len(line) - len(stripped_line)
+        if current_indentation >= base_indentation_level:
+            # Adjust current indentation based on ground truth
+            additional_indent = " " * (current_indentation - base_indentation_level)
+            aligned_line = ground_truth_indentation + additional_indent + stripped_line
+        else:
+            aligned_line = stripped_line  # In case there's no leading whitespace
+
+        aligned_lines.append(aligned_line)
+
+    return "\n".join(aligned_lines)

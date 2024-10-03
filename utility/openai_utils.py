@@ -78,6 +78,45 @@ def sort_even(l: list):
     return [even[i // 2] if i % 2 == 0 else l[i] for i in range(len(l))]
 ```\n\n'''
 
+EDITTING_SYSTEM_PROMPT = """You are given a code editing problem where the provided solution does not meet the requirements outlined in the instructions. Your task is to:
+1. Identify the specific line(s) of code that contain errors. Clearly indicate each erroneous part using multiple code blocks if there are several separate issues (enclosed within triple backticks (```).
+2. Provide a fully corrected version of the code, ensuring it is runnable and satisfies all given requirements.
+"""
+
+EDITTING_EXAMPLE_PROMPT = '''\n\nExample Response Format:\n\n\
+Instruction: Change data structure of a and c from List to Dict.
+Original Code:
+```
+a = list()
+b = 1
+c = list()
+```
+
+The wrong edited code:
+```
+a = set()
+b = 1
+c = set()
+```
+
+Your answer:
+The erroneous code block(s): 
+```
+a = set()
+```
+
+```
+c = set()
+```
+
+The corrected version: 
+```
+a = dict()
+b = 1
+c = dict()
+```
+'''
+
 
 
 def get_translation_error_prompt(source_lang, 
@@ -110,6 +149,21 @@ def get_generation_error_prompt(generated_code,
     if error_test_case is not None:
         openai_user_input += "The test cases that failed are: \n{}\n\n".format("".join(error_test_case))
     openai_user_input += "Your answer:\n"
+    message = {"system": openai_system_input, "user": openai_user_input}
+    return message
+
+def get_editting_error_prompt(generated_code,
+                              instruction,
+                              gt_code,
+                              openai_prompt=EDITTING_SYSTEM_PROMPT,
+                              example_prompt=EDITTING_EXAMPLE_PROMPT):
+    openai_system_input = openai_prompt + example_prompt
+    openai_user_input = "Now here is the problem\n\n" +\
+    "Instruction: {}\n\n".format(instruction) +\
+    "Original Code: \n```{}\n```\n\n".format(generated_code) +\
+    "The wrong edited code: \n```{}\n```\n\n".format(generated_code) +\
+    "Reference correct code: \n```{}\n```\n\n".format(gt_code) +\
+    "\n\nYour answer:\n"
     message = {"system": openai_system_input, "user": openai_user_input}
     return message
 
