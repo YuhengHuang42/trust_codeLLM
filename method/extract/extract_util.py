@@ -33,14 +33,17 @@ class TransHookRecorder:
     """This is the hook for Transformer model.
     It is used to record the value of hidden states.
     """
-    def __init__(self, layer_names: dict, model):
+    def __init__(self, layer_names: dict, model, mode="attention"):
         '''
         layer_names: dict. The key is the layer name, and the value is the configuration.
             Example: {"model.layers.47.self_attn": {"output_attentions": True}}
+            Example: {'model.layers.35': {"return_first": True}}
         '''
         self.parameter_recorder = dict()
         self.recorder = dict()
         self.layer_names = layer_names
+        self.mode = mode
+        assert self.mode in ["attention", "plain"]
         if isinstance(model, torch.nn.DataParallel):
             self.model = model.module
         else:
@@ -50,8 +53,13 @@ class TransHookRecorder:
     
     def _register_hooker(self, name):
         self.recorder[name] = list()
+        return_first = False
+        if "return_first" in self.layer_names[name]:
+            return_first = self.layer_names[name]["return_first"]
         def named_hooker(module, input, output):
-            self.recorder[name].append(output.cpu())
+            if return_first:
+                output = output[0].cpu()
+            self.recorder[name].append(output)
         return named_hooker
     
     def _register_pre_hooker(self, name):
@@ -69,16 +77,44 @@ class TransHookRecorder:
         return named_hooker
     
     def register_hookers(self):
-        for l_name in self.layer_names:
-            module = parse_layer_name(l_name, self.model)
-            if module == None:
-                raise Exception("Layer not found")
-            handler_pre = module.register_forward_pre_hook(self._register_pre_hooker(l_name), with_kwargs=True)
-            self.handlers.append(handler_pre)
-            #handler_post = module.register_forward_hook(self._register_hooker(l_name), with_kwargs=True)
-            #self.handlers.append(handler_post)
+        if self.mode == "attention":
+            for l_name in self.layer_names:
+                module = parse_layer_name(l_name, self.model)
+                if module == None:
+                    raise Exception("Layer not found")
+                handler_pre = module.register_forward_pre_hook(self._register_pre_hooker(l_name), with_kwargs=True)
+                self.handlers.append(handler_pre)
+                #handler_post = module.register_forward_hook(self._register_hooker(l_name), with_kwargs=True)
+                #self.handlers.append(handler_post)
+        elif self.mode == "plain":
+            for l_name in self.layer_names:
+                module = parse_layer_name(l_name, self.model)
+                if module == None:
+                    raise Exception("Layer not found")
+                handler = module.register_forward_hook(self._register_hooker(l_name))
+                self.handlers.append(handler)
+            
     
     def forward(self, input_dict):
+        if self.mode == "attention":
+            return self.rerun_forward(input_dict)
+        else:
+            return self.plain_forward(input_dict)
+
+    
+    
+    def plain_forward(self, input_dict):
+        """
+        
+        """
+        self.remove_handlers()
+        self.register_hookers()
+        with torch.inference_mode():
+            snapshot = self.model.forward(**input_dict)
+        self.remove_handlers()
+        return snapshot, self.recorder
+    
+    def rerun_forward(self, input_dict):
         """
         Extract the internal states of the model by first dry running the model, using hooks to 
         record the intermediate input configurations, and then running the specific module again to get the profiled results.
@@ -89,6 +125,7 @@ class TransHookRecorder:
             snapshot: dict. The output of the model.
             recorder: dict. The recorded intermediate states. layer_name --> output.
         """
+        self.remove_handlers()
         self.register_hookers()
         with torch.inference_mode():
             snapshot = self.model.forward(**input_dict)

@@ -19,7 +19,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
 from method import lbl
-import method.extract as extract
+import method.extract.extract_util as extract_util
 import utility.utils as utils
 import task.defect4j as defects4j
 from task import dataset_utils
@@ -76,7 +76,7 @@ def evaluate_lbl(data,
                         }
         with torch.inference_mode():
             # If transformer.__version__ == v4.45.1, directly import it from transformers.cache_utils 
-            past_key_values = extract.OffloadedCache() # GPU Memory Efficient
+            past_key_values = extract_util.OffloadedCache() # GPU Memory Efficient
             tokenized_info["past_key_values"] = past_key_values
             try:
                 #snapshot = model.forward(**tokenized_info, output_attentions=True)
@@ -134,7 +134,7 @@ def main(
         cache_dir = None
     # ===== Load Model =====
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
-    recorder = extract.TransHookRecorder({attn_layer: {"output_attentions": True}}, model)
+    recorder = extract_util.TransHookRecorder({attn_layer: {"output_attentions": True}}, model)
     FALLBACK_ARGS["model_name"] = model_name
     FALLBACK_ARGS["parallel"] = parallel
     FALLBACK_ARGS["cache_dir"] = cache_dir
@@ -192,7 +192,7 @@ def main(
         gc.collect()
         torch.cuda.empty_cache()
         model, tokenizer = utils.load_opensource_model(**FALLBACK_ARGS)
-        recorder = extract.TransHookRecorder({attn_layer: {"output_attentions": True}}, model)
+        recorder = extract_util.TransHookRecorder({attn_layer: {"output_attentions": True}}, model)
         score, counter, second_result, oom_keys = evaluate_lbl(data, 
                                                             oom_keys, 
                                                             important_token_info, 
