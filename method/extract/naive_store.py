@@ -86,5 +86,8 @@ class NaiveTensorStore(Dataset):
         
         self.data = TensorDict.load_memmap(os.path.join(self.save_dir, self.memmap_name))
     
+    def __del__(self):
+        if self.save_dir is not None:
+            self.save_to_disk()
         
 

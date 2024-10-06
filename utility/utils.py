@@ -10,7 +10,26 @@ from pygments.token import Token
 import numpy as np
 import difflib
 from loguru import logger
-  
+
+def match_token_in_offset_mapping(offset_mapping, start_pos, end_pos):
+    """
+    Match the target_str in the tokenized_info["offset_mapping"].
+    Return the start index and the end index of the `token list`
+    """
+    
+    start_idx = None
+    end_idx = None
+    for idx, (left, right) in enumerate(offset_mapping):
+        if start_idx is None and (start_pos >= left and start_pos < right):
+            start_idx = idx
+        if end_idx is None and (end_pos >= left and end_pos <= right):
+            end_idx = idx
+            break
+    assert start_idx is not None
+    assert end_idx is not None
+    
+    return (start_idx, end_idx)
+
 def identify_start_end_substr(original_tokens, target_str, tokenizer):
     """
     Find the start index and end index of the target_str in the original_str for tokenized string.
@@ -23,18 +42,9 @@ def identify_start_end_substr(original_tokens, target_str, tokenizer):
     assert start_pos > 0, "target_str not in original_tokens"
     end_pos = start_pos + len(target_str)
     
-    start_idx = None
-    end_idx = None
-    for idx, (left, right) in enumerate(original_token_info['offset_mapping']):
-        if start_idx is None and (start_pos >= left and start_pos < right):
-            start_idx = idx
-        if end_idx is None and (end_pos >= left and end_pos < right):
-            end_idx = idx
-            break
-    assert start_idx is not None
-    assert end_idx is not None
+    result = match_token_in_offset_mapping(original_token_info["offset_mapping"], start_pos, end_pos)
     
-    return (start_idx, end_idx)
+    return result
 
 def aggregate_scores(token_list, scores, sep=["\n", "\n\n", "\n\n\n"]):
     result = [[], []]
@@ -308,6 +318,20 @@ def load_shelve_and_resume(dir_path):
     
     # Return the next index to resume
     return len(loaded_data), path
+
+def find_all_occurrences(substring, string):
+    """
+    Find all occurrences of a substring in a string.
+    """
+    positions = []
+    start = 0
+    while start < len(string):
+        pos = string.find(substring, start)
+        if pos == -1:
+            break
+        positions.append(pos)
+        start = pos + 1
+    return positions
 
 def extract_code_block(text, select_idx=None):
     """
