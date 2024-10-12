@@ -10,11 +10,10 @@ import torch
 import tqdm
 import time
 
-import sys
-from pathlib import Path
-project_root = Path(__file__).resolve().parent.parent
+#import sys
+#project_root = Path(__file__).resolve().parent.parent
 # Add the project root to sys.path
-sys.path.append(str(project_root))
+#sys.path.append(str(project_root))
 
 import utility.utils as utils
 from method.extract import extract_util

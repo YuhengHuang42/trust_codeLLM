@@ -379,35 +379,9 @@ def extract_code_block(text, select_idx=None):
         return None, None  # Return None if select_idx is out of bounds
     
 
-def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, numeric_stability=1e-7):
-    """
-    Collect features as hallucination detection mentioned in the paper.
-    ---
-    Args:
-        attn_snapshot: Tuple[Tensor]. Each layer's multi-head attention map, 
-            which has the shape [1, head_num, token_num, token_num]. It should be the full input version.
-        layer: int. The index of the selected layer as feature.
-        input_token_length: int. The token length of the input prompt.
-        output_seg: List[List]: List of segment tokens. It should be str_output version
-    Return:
-        vt: torch.tensor. vt in the paper with the shape [multi_head_num]
-    """
+
     
-    al_context = attn_snapshot[layer][0][:, -1, :input_token_length]
-    al_context = torch.mean(al_context, dim=-1)
-    al_result = list()
-    for seg in output_seg:
-        real_seg = [i + input_token_length for i in seg]
-        attn_seg = attn_snapshot[layer][0][:, -1, real_seg]
-        al_attn_score = torch.mean(attn_seg, dim=-1)
-        al_attn_score = al_context / (al_context + al_attn_score + numeric_stability)
-        al_result.append(al_attn_score)
-    #al_new = attn_snapshot[layer][0][:, -1, input_token_length:]
-    #al_new = torch.mean(al_new, dim=-1)
-    
-    #lr = al_context / (al_context + al_new)
-    #return lr
-    return al_result
+
 
 def label_seg(gt_seg, output_seg):
     """

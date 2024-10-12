@@ -8,6 +8,10 @@ class NaiveTensorStore(Dataset):
     def __init__(self, 
                  memmap_name="disk_memmap", 
                  meta_name="meta.json"):
+        """
+        Torch tensor storage to map large data to disk.
+        By default, Label=0 means it is only a placeholder and do not contain any real data.
+        """
         self.allocated_size = None
         self.config = None
         self.save_dir = None
@@ -40,7 +44,9 @@ class NaiveTensorStore(Dataset):
     def __getitem__(self, idx):
         # While this upper bound might not be the actual length
         # We do not want to set additional safety checks
-        assert idx < len(self.data)
+        #assert idx < len(self.data)
+        if idx >= self.save_pointer:
+            raise IndexError
         return self.data[idx]
     
     def __len__(self):
@@ -84,7 +90,7 @@ class NaiveTensorStore(Dataset):
         self.save_dir = save_dir
         #self.meta_name = meta_info['meta_name']
         
-        self.data = TensorDict.load_memmap(os.path.join(self.save_dir, self.memmap_name))
+        self.data = TensorDict.load(os.path.join(self.save_dir, self.memmap_name))
     
     def __del__(self):
         if self.save_dir is not None:

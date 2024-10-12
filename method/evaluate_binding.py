@@ -18,8 +18,8 @@ project_root = Path(__file__).resolve().parent.parent
 # Add the project root to sys.path
 sys.path.append(str(project_root))
 
-from method import lbl
 import method.extract.extract_util as extract_util
+from method import detect_model
 import utility.utils as utils
 import task.defect4j as defects4j
 from task import dataset_utils
@@ -48,9 +48,9 @@ def evaluate_lbl(data,
                  important_token_info, 
                  recorder, 
                  tokenizer,
-                 lbl_model, 
+                 detection_model, 
                  language, 
-                 attn_layer,
+                 layer,
                  score=0,
                  counter=0,
                  topk=5,
@@ -80,16 +80,17 @@ def evaluate_lbl(data,
             tokenized_info["past_key_values"] = past_key_values
             try:
                 #snapshot = model.forward(**tokenized_info, output_attentions=True)
-                snapshot, attn_ext = recorder.forward(tokenized_info)
+                #snapshot, hook_info = recorder.forward(tokenized_info)
+                pred_result = detection_model.predict_using_recorder(recorder, tokenized_info, input_token_length, candidate_tokens)
             except torch.cuda.OutOfMemoryError as e:
                 oom_keys.append(key)
                 torch.cuda.empty_cache()
                 logger.info(f"Out of Memory error occurred for key: {key}. Moving to next.")
                 continue
-        attn_snapshot = attn_ext[attn_layer]
-        del snapshot
+        #attn_snapshot = hook_info[layer]
+        #del snapshot
         # Inference process of LBL baseline method
-        pred_result = lbl_model.predict([attn_snapshot], input_token_length, candidate_tokens)
+        #pred_result = detection_model.predict([attn_snapshot], input_token_length, candidate_tokens)
         pred_result = pred_result[:, 1]
         result[key] = pred_result
         rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk]
@@ -112,18 +113,23 @@ def main(
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
-        "user_args": {"attn_implementation":"eager"}
+        #"user_args": {"attn_implementation":"eager"}
     }
     # ===== Load configuration =====
     with open(config_file, 'r') as file:
         config_dict = yaml.safe_load(file)
     model_name = config_dict["llm_config"]["model_name"]
     quantization = config_dict["llm_config"]["quantization"]
-    attn_layer = config_dict["task_config"]["attn_layer"]
+    layer = config_dict["task_config"]["layer"]
     language = config_dict["task_config"]["language"]
-    lbl_model_path = config_dict["task_config"]["lbl_model_path"]
+    detection_model_path = config_dict["task_config"]["detection_model_path"]
+    mode = config_dict["task_config"]["mode"]
     max_profile_token_length = config_dict["task_config"]["max_profile_token_length"]
     extract_code = config_dict["task_config"]["extract_code"]
+    collect_type = config_dict["task_config"]['collect_type']
+    mode = config_dict["task_config"]['mode']
+    assert collect_type in ["attention", "hidden"]
+    assert mode in ["lbl", "sae"]
     
     cache_dir = None
     if "HF_HOME" in config_dict["system_setting"]:
@@ -134,7 +140,10 @@ def main(
         cache_dir = None
     # ===== Load Model =====
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
-    recorder = extract_util.TransHookRecorder({attn_layer: {"output_attentions": True}}, model)
+    if collect_type == "attention":
+        recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
+    elif collect_type == "hidden":
+        recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
     FALLBACK_ARGS["model_name"] = model_name
     FALLBACK_ARGS["parallel"] = parallel
     FALLBACK_ARGS["cache_dir"] = cache_dir
@@ -169,17 +178,20 @@ def main(
         evaluate_key_list.append(key)
 
     # ==== Begin collecting attention scores ====
-    lbl_model = lbl.LBLRegression()
-    lbl_model.load(lbl_model_path)
+    if mode == "lbl":
+        detection_model = detect_model.LBLRegression.load(detection_model_path)
+    elif mode == "sae":
+        detection_model = detect_model.EncoderClassifier.load(detection_model_path)
+    #lbl_model.load(lbl_model_path)
     
     score, counter, first_result, oom_keys = evaluate_lbl(data, 
                                                         evaluate_key_list, 
                                                         important_token_info, 
                                                         recorder, 
                                                         tokenizer,
-                                                        lbl_model, 
+                                                        detection_model, 
                                                         language, 
-                                                        attn_layer,
+                                                        layer,
                                                         max_profile_token_length=max_profile_token_length,
                                                         extract_code=extract_code
                                                         )
@@ -192,15 +204,18 @@ def main(
         gc.collect()
         torch.cuda.empty_cache()
         model, tokenizer = utils.load_opensource_model(**FALLBACK_ARGS)
-        recorder = extract_util.TransHookRecorder({attn_layer: {"output_attentions": True}}, model)
+        if collect_type == "attention":
+            recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
+        elif collect_type == "hidden":
+            recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
         score, counter, second_result, oom_keys = evaluate_lbl(data, 
                                                             oom_keys, 
                                                             important_token_info, 
                                                             recorder, 
                                                             tokenizer,
-                                                            lbl_model, 
+                                                            detection_model, 
                                                             language, 
-                                                            attn_layer,
+                                                            layer,
                                                             score=score,
                                                             counter=counter,
                                                             max_profile_token_length=max_profile_token_length,
