@@ -16,20 +16,6 @@ import torchinfo
 from sae_model import Autoencoder, TopK, normalized_mean_squared_error
 from extract.naive_store import NaiveTensorStore
 
-
-def get_collate_fn(feature_name):
-    def collate_fn(batch):
-        feature = []
-        labels = []
-        for x in batch:
-            item = x.to_dict()
-            feature.append(item[feature_name])
-            labels.append(item['labels'])
-        return_x = torch.stack(feature)
-        labels = torch.stack(labels)
-        return (return_x, labels)
-    return collate_fn
-
 def compute_grad_norm(model):
     total_grad_norm = 0
     for param in model.parameters():
@@ -187,12 +173,12 @@ def main(
     sae = sae.to(device)
     
     
-    store = NaiveTensorStore()
-    store.load_from_disk(storage_path)
+    store = NaiveTensorStore.load_from_disk(storage_path)
     
     #optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, sae.parameters()), lr=learning_rate,  eps=eps)
     optimizer = torch.optim.AdamW(sae.parameters(), lr=learning_rate,  eps=eps)
-    data_loader =  DataLoader(store, batch_size=batch_size, collate_fn=get_collate_fn(feature_name), shuffle=True)
+    #data_loader =  DataLoader(store, batch_size=batch_size, collate_fn=get_collate_fn(feature_name), shuffle=True)
+    data_loader = store.get_data_loader(batch_size, feature_name, shuffle=True)
     if scheduler_type == "cos":
         training_step = len(data_loader) * epoch_num
         warmup_step = math.floor(training_step * 0.1) # Hard-code. 
