@@ -10,23 +10,30 @@ import torch
 import tqdm
 import time
 
-#import sys
-#project_root = Path(__file__).resolve().parent.parent
+import sys
+project_root = Path(__file__).resolve().parent.parent
 # Add the project root to sys.path
-#sys.path.append(str(project_root))
+sys.path.append(str(project_root))
 
 import utility.utils as utils
 from method.extract import extract_util
 from method.extract import naive_store
 
 
+def remove_empty_lines(input_string):
+    # Split the string into lines
+    lines = input_string.splitlines()
+    # Filter out empty lines
+    non_empty_lines = [line for line in lines if line.strip() != "" and line.strip().startswith("```") == False]
+    # Join the non-empty lines back into a single string
+    return "\n".join(non_empty_lines)
 
 class PretrainCodedata(Dataset):
     def __init__(self, 
-                 data: datasets.arrow_dataset.Dataset,
+                 dataset_id: str,
                  feature_key_list: list=["java", "python", "c++", "javascript"],
                  preprocess_all_in_memory=False,
-                 split_token="\n"
+                 split_token="\n",
                  ):
         """
         
@@ -36,7 +43,9 @@ class PretrainCodedata(Dataset):
                 This flag will result in a totally different behaviors in this class 
                 (e.g., data length, returned item). 
         """
-        self.data = data
+        # datasets.arrow_dataset.Dataset
+        self.dataset_id = dataset_id
+        self.data = datasets.load_dataset(dataset_id)["train"]
         self.processed_data = None
         self.feature_key_list = feature_key_list
         self.preprocess_all_in_memory = preprocess_all_in_memory
@@ -48,7 +57,12 @@ class PretrainCodedata(Dataset):
     
     def _preprocess_data_single(self, item):
         return_dict = {"context": None, "output": {}}
-        return_dict['context'] = item["content"]
+        if self.dataset_id == "greengerong/leetcode":
+            return_dict['context'] = item["content"]
+        elif self.dataset_id == "m-a-p/CodeFeedback-Filtered-Instruction":
+            return_dict['context'] = item["query"]
+        elif self.dataset_id == "ise-uiuc/Magicoder-OSS-Instruct-75K":
+            return_dict['context'] = item["problem"]
         for key in self.feature_key_list:
             codes, code_pos_infos = utils.extract_code_block(item[key])
             if len(codes) < 1:
@@ -57,9 +71,16 @@ class PretrainCodedata(Dataset):
                 continue
             code = codes[-1]
             code_pos_info = code_pos_infos[-1]
-            code_description_start_pos = utils.find_all_occurrences("\n", item[key][code_pos_info[-1]:])[0]
-            code_description_start_pos = code_description_start_pos + code_pos_info[-1]
-            code_description = item[key][code_description_start_pos:]
+            problem_description = remove_empty_lines(item[key][:code_pos_info[0]])
+            
+            code_description_start_pos = utils.find_all_occurrences("\n", item[key][code_pos_info[-1]:])
+            if len(code_description_start_pos) == 0:
+                code_description = ""
+            else:
+                code_description_start_pos = code_description_start_pos[0]
+                code_description_start_pos = code_description_start_pos + code_pos_info[-1]
+                code_description = item[key][code_description_start_pos:]
+                code_description = remove_empty_lines(code_description)
             split_pos = utils.find_all_occurrences(self.split_token, code)
             previous_pos = 0
             processed_split_pos = []
@@ -72,7 +93,8 @@ class PretrainCodedata(Dataset):
                     previous_pos = pos
             return_dict["output"][key] = {"code": code, 
                                           "code_description": code_description, 
-                                          "code_split_pos": processed_split_pos
+                                          "code_split_pos": processed_split_pos,
+                                          "problem_description": problem_description
                                           }
         return return_dict
     
@@ -81,7 +103,9 @@ class PretrainCodedata(Dataset):
         for item in self.data:
             processed_item = self._preprocess_data_single(item)
             for key in processed_item["output"]:
-                self.processed_data.append({"context": processed_item["context"], "output": processed_item["output"][key]})
+                self.processed_data.append({"context": processed_item["context"], 
+                                            "output": processed_item["output"][key]}
+                                           )
     
     def __getitem__(self, index):
         if self.preprocess_all_in_memory:
@@ -120,9 +144,11 @@ def inference_and_collect(
         item = item[0]
         context = item['context']
         code_description = item['output']['code_description']
+        problem_description = item['output']['problem_description']
+        description = problem_description + code_description
         code = item['output']['code']
-        target_input = context + code_description + "\n```\n" + code
-        context_str_len = len(context + code_description + "\n```\n")
+        target_input = context + description + "\n```\n" + code
+        context_str_len = len(context + description + "\n```\n")
         input_info = tokenizer(target_input, return_tensors="pt", return_offsets_mapping=True)
         offset_mapping = input_info["offset_mapping"].squeeze().tolist()
         input_info.pop("offset_mapping")
@@ -166,8 +192,9 @@ def main(
     quantization = config_dict["llm_config"]["quantization"]
     hidden_layer = config_dict["task_config"]["hidden_layer"]
     hidden_neuron = config_dict["task_config"]["hidden_neuron"]
-    dataset_name = config_dict['task_config']["dataset_name"]
     split_token = config_dict['task_config']["split_token"]
+    dataset_name = config_dict['task_config']["dataset_name"]
+    feature_key_list = config_dict['task_config']["feature_key_list"]
     store_storage_multiplier = config_dict['task_config']["store_storage_multiplier"]
     
     cache_dir = None
@@ -181,9 +208,9 @@ def main(
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
     recorder = extract_util.TransHookRecorder({hidden_layer: {"return_first": True}}, model, mode="plain")
     
-    leetcode_data = datasets.load_dataset(dataset_name)
     data = PretrainCodedata(
-        leetcode_data["train"],
+        dataset_name,
+        feature_key_list,
         preprocess_all_in_memory=True,
         split_token=split_token
     )

@@ -11,6 +11,7 @@ from typing_extensions import Annotated
 from pathlib import Path
 import json
 import gc
+import time
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 
 import sys
@@ -21,7 +22,6 @@ sys.path.append(str(project_root))
 import method.extract.extract_util as extract_util
 from method import detect_model
 import utility.utils as utils
-import task.defect4j as defects4j
 from task import dataset_utils
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
@@ -113,7 +113,8 @@ def main(
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
-        #"user_args": {"attn_implementation":"eager"}
+        "user_args": {"attn_implementation":"eager"},
+        "device_map": "balanced"
     }
     # ===== Load configuration =====
     with open(config_file, 'r') as file:
@@ -201,6 +202,7 @@ def main(
         logger.info("Begin fallback inference for OOM data points")
         del recorder
         del model
+        time.sleep(3)
         gc.collect()
         torch.cuda.empty_cache()
         model, tokenizer = utils.load_opensource_model(**FALLBACK_ARGS)

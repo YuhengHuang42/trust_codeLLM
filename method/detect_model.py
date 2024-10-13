@@ -145,7 +145,7 @@ class LBLRegression():
         model = cls()
         model.clf = loaded_info["model"]
         model.fit_model_param = loaded_info["param"]
-        model.layer = loaded_info["attn_layer"]
+        model.attn_layer = loaded_info["attn_layer"]
         model.model_type = loaded_info["model_type"]
         return model
     
