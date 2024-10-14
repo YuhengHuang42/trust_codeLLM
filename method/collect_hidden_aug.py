@@ -11,6 +11,7 @@ import tqdm
 import time
 import copy
 import random
+import math
 
 import sys
 project_root = Path(__file__).resolve().parent.parent
@@ -55,9 +56,9 @@ class AugPretrainCodedata(PretrainCodedata):
         self.mutate_prop = mutate_prop
         self.original_label = original_label
         self.mutated_label = mutated_label
+        if preprocess_all_in_memory:
+            self.aug_data_all()
         
-    
-
     def _get_mutated_code(self, idx, code, code_split_pos, mutated_pos_list, mutated_op_list):
         """
         ---
@@ -65,7 +66,7 @@ class AugPretrainCodedata(PretrainCodedata):
             idx: int. The index of the data.
             code: str. The original code.
             code_split_pos: List[int]. The split position ("\n") of the original code.
-            mutated_pos_list: List[int]. The position of the code to be mutated.
+            mutated_pos_list: List[int]. The index of the original pos_list to be mutated.
             mutated_op_list: List[str]. The operator to be used for mutation.
         Return:
             new_mutated: str. The mutated code.
@@ -128,6 +129,16 @@ class AugPretrainCodedata(PretrainCodedata):
         #    elif indicator == DROP:
         #        mutate_pos = min(mutated_pos_index_list[idx] + 1, len(new_mutated_code_split_pos)-1)
         #        contrastive_mutated.append(new_mutated_code_split_pos[mutate_pos])
+        try:
+            assert len(labels) > 0
+        except:
+            logger.error("Code Mutation Error: No Code Left")
+            logger.error("labels", labels)
+            logger.error("mutated_op_list", mutated_op_list)
+            logger.error("new_mutated_code_split_pos", new_mutated_code_split_pos)
+            logger.error("new_mutated", new_mutated)
+            logger.error("original code", code)
+            raise Exception
         for drop_idx in drop_label_idx_recorder:
             drop_idx = min(drop_idx, len(labels)-1)
             labels[drop_idx] = self.mutated_label
@@ -139,11 +150,40 @@ class AugPretrainCodedata(PretrainCodedata):
     def aug_data_single(self, index):
         if self.preprocess_all_in_memory:
             item = self.processed_data[index]
+            item_list = [item]
         else:
             item = self.data[index]
-            item = self._preprocess_data_single(item)
-        
-        pass
+            item_list = self._preprocess_data_single(item) # Return List
+        for item in item_list:
+            code = item['output']['code']
+            code_split_pos = item['output']['code_split_pos']
+            mutated_pos_list = [i for i in range(len(code_split_pos))]
+            random.shuffle(mutated_pos_list)
+            mutated_num = max(math.ceil(len(mutated_pos_list) * self.mutate_prop), 1)
+            mutated_pos_list = mutated_pos_list[:mutated_num]
+            if mutated_num <= 2:
+                # To avoid no code left error
+                mutated_op_list = ["switch_outside"] * mutated_num
+            else:
+                mutated_op_list = random.choices(["switch_inside", "switch_outside", "delete_line"], k=mutated_num)
+                if set(mutated_op_list) == {"delete_line"}:
+                    mutated_op_list[0] = random.choices(["switch_inside", "switch_outside"], k=1)[0]
+            new_mutated, new_mutated_code_split_pos, labels, contrastive_pair = self._get_mutated_code(index, code, code_split_pos, mutated_pos_list, mutated_op_list)
+            item["mutated_code"] = {
+                "code": new_mutated,
+                "code_split_pos": new_mutated_code_split_pos,
+                "line_label": labels,
+                "contrastive_pair": contrastive_pair
+            }
+        return item_list
+    
+    def aug_data_all(self):
+        if not self.preprocess_all_in_memory:
+            self._preprocess_data()
+            self.preprocess_all_in_memory = True
+        for idx in tqdm.tqdm(range(len(self.processed_data))):
+            self.processed_data[idx] = self.aug_data_single(idx)[0]
+            
     
     def select_line_according_to_split(self, code, previous_pos, cur_pos):
         real_start_pos = previous_pos + len(self.split_token) if previous_pos >= 0 else 0
@@ -166,13 +206,17 @@ class AugPretrainCodedata(PretrainCodedata):
         return ""
     
     def switch_outside(self, data_idx, cur_line):
-        valid_numbers = [num for num in range(0, len(self.processed_data)) if num != data_idx]
+        if self.preprocess_all_in_memory:
+            valid_numbers = [num for num in range(0, len(self.processed_data)) if num != data_idx]
+        else:
+            valid_numbers = [num for num in range(0, len(self.data)) if num != data_idx]
         random.shuffle(valid_numbers)
         for chosen_idx in valid_numbers:
             if self.preprocess_all_in_memory:
                 processed_data = self.processed_data[chosen_idx]
             else:
-                processed_data = self._preprocess_data_single(self.data[chosen_idx])
+                processed_data_list = self._preprocess_data_single(self.data[chosen_idx]) # Return a list
+                processed_data = random.choices(processed_data_list, k=1)[0]
             other_code_split_pos = copy.deepcopy(processed_data['output']['code_split_pos'])
             cur_code = processed_data['output']['code']
             random_select_list = [num for num in range(0, len(other_code_split_pos))]
@@ -193,10 +237,19 @@ class AugPretrainCodedata(PretrainCodedata):
         return ""
     
     def __getitem__(self, index):
-        pass
+        if self.preprocess_all_in_memory:
+            item = self.processed_data[index]
+        else:
+            item = self.data[index]
+            item = self.aug_data_single(item)
+            
+        return item
 
     def __len__(self):
-        pass
+        if self.preprocess_all_in_memory:
+            return len(self.processed_data)
+        else:
+            return len(self.data)
     
     def compute_all_inference_num(self):
         token_num = 0

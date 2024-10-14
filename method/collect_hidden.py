@@ -28,6 +28,17 @@ def remove_empty_lines(input_string):
     # Join the non-empty lines back into a single string
     return "\n".join(non_empty_lines)
 
+def remove_item_from_dataset(dataset: datasets.dataset_dict.DatasetDict, idx):
+    if isinstance(idx, int):
+        idx = [idx]
+    dataset = dataset.select(
+        (
+            i for i in range(len(dataset)) 
+            if i not in set(idx)
+        )
+    )
+    return dataset
+
 class PretrainCodedata(Dataset):
     def __init__(self, 
                  dataset_id: str,
@@ -46,6 +57,8 @@ class PretrainCodedata(Dataset):
         # datasets.arrow_dataset.Dataset
         self.dataset_id = dataset_id
         self.data = datasets.load_dataset(dataset_id)["train"]
+        if dataset_id == "greengerong/leetcode":
+            self.data = remove_item_from_dataset(self.data, 1715) # Remove the corrupted data
         self.processed_data = None
         self.feature_key_list = feature_key_list
         self.preprocess_all_in_memory = preprocess_all_in_memory
@@ -96,16 +109,25 @@ class PretrainCodedata(Dataset):
                                           "code_split_pos": processed_split_pos,
                                           "problem_description": problem_description
                                           }
-        return return_dict
+        return_list = []
+        for key in return_dict["output"]:
+            if return_dict["output"][key]['code'].strip() == "":
+                continue
+            return_list.append(
+                {"context": return_dict["context"], 
+                 "output": return_dict["output"][key]}
+            )
+        return return_list
     
     def _preprocess_data(self):
         self.processed_data = []
         for item in self.data:
             processed_item = self._preprocess_data_single(item)
-            for key in processed_item["output"]:
-                self.processed_data.append({"context": processed_item["context"], 
-                                            "output": processed_item["output"][key]}
-                                           )
+            self.processed_data += processed_item
+            #for key in processed_item["output"]:
+            #    self.processed_data.append({"context": processed_item["context"], 
+            #                                "output": processed_item["output"][key]}
+            #                               )
     
     def __getitem__(self, index):
         if self.preprocess_all_in_memory:
