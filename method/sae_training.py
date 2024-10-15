@@ -7,14 +7,13 @@ import yaml
 import torch
 import numpy as np
 import wandb
-from torch.utils.data import DataLoader
 import transformers
 import math
 import os
 import torchinfo
 
 from sae_model import Autoencoder, TopK, normalized_mean_squared_error
-from extract.naive_store import NaiveTensorStore
+from extract.naive_store import NaiveTensorStore, VariedKeyTensorStore
 
 def compute_grad_norm(model):
     total_grad_norm = 0
@@ -107,7 +106,6 @@ def training_one_epoch(sae,
 def evaluate(sae, data_loader, loss_fn):
     sae.eval()
     loss_list = list()
-    code_list = list()
     for idx, store_batch in (enumerate(data_loader)):
         with torch.inference_mode():
             batch_x = store_batch[0]
@@ -119,6 +117,105 @@ def evaluate(sae, data_loader, loss_fn):
             latents_pre_act, latents, recons = sae(batch_x)
             # Get loss
             total_loss = loss_fn(recons, batch_x)
+            cur_loss = total_loss.detach().cpu().item()
+            loss_list.append(cur_loss)
+    return np.average(loss_list)
+
+def training_one_epoch_contrastive(sae, 
+                       data_loader, 
+                       optimizer, 
+                       recon_loss_fn, 
+                       epoch,
+                       path,
+                       contrastive_loss_fn=None,
+                       print_freq_prop=0.2, 
+                       scheduler=None, 
+                       wandb_handle=None, 
+                       clip_grad=False):
+    sae.train()
+    loss_list = list()
+    local_step_num = len(data_loader)
+    cum_time = 0
+    print_freq = round(local_step_num * print_freq_prop)
+    for idx, store_batch in enumerate(data_loader):
+        original, mutated, original_index, mutated_index, ori_div_list = store_batch
+        start_time = time.time()
+        optimizer.zero_grad()
+        original = original.to(sae.device)
+        ori_latents_pre_act, ori_latents, ori_recons = sae(original)
+        mutated = mutated.to(sae.device)
+        mut_latents_pre_act, mut_latents, mut_recons = sae(mutated)
+        recon_loss = recon_loss_fn(ori_recons, original) + recon_loss_fn(mut_recons, mutated)
+        if contrastive_loss_fn is None:
+            total_loss = recon_loss
+        else:
+            total_loss = recon_loss + contrastive_loss_fn(ori_latents[original_index], mut_latents[mutated_index])
+        total_loss.backward()
+        if clip_grad:
+            pre_norm = compute_grad_norm(sae)
+            #torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, sae.parameters()), 0.1)
+            try:
+                torch.nn.utils.clip_grad_norm_(sae.parameters(), 1, error_if_nonfinite=True)
+            except:
+                bug_save_path = os.path.join(path, f"error_epoch_{epoch}.pt")
+                logger.error(f"Error at epoch {epoch} idx {idx}")
+                logger.error("Saving to {}".format(bug_save_path))
+                torch.save(
+                                {'iter': epoch,
+                                 "loss_list": loss_list,
+                                 'model_state_dict': sae.state_dict(),
+                                 'optimizer_state_dict': optimizer.state_dict(),
+                                 "batch_x": original.detach().to("cpu")
+                                }, 
+                                bug_save_path
+                )
+                raise Exception
+            #after_norm = compute_grad_norm(sae)
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+            lr = float(scheduler.get_last_lr()[0])
+        else:
+            lr = optimizer.param_groups[0]['lr']
+        cur_loss = total_loss.detach().cpu().item()
+        loss_list.append(cur_loss)
+        #l2_norm = 0
+        #for param in sae.parameters():
+        #    l2_norm += torch.norm(param, p=2)  # L2 norm for each parameter
+        if wandb_handle is not None:
+                        wandb.log({
+                            "epoch": epoch,
+                            "Loss": loss_list[-1],
+                            "LR": lr,
+                            #"L2_model_params": l2_norm,
+                            "grad_before_norm": pre_norm,
+                            #"recons_norm": torch.norm(recons, p=2),
+                            #"batch_x_norm": torch.norm(batch_x, p=2),
+                        })
+        end_time = time.time()
+        cum_time += end_time - start_time
+        if idx % print_freq == 0:
+            batch_time = cum_time / idx if idx > 0 else cum_time
+            cur_loss = np.average(loss_list)
+            logger.info(
+                f'Epoch: [{epoch}][{idx}/{local_step_num}]\t'
+                f'Batch Time: {batch_time}\t'
+                f'Loss: {cur_loss}'
+            )
+    return sae, loss_list
+
+def evaluate_contrastive(sae, data_loader, loss_fn):
+    sae.eval()
+    loss_list = list()
+    for idx, store_batch in (enumerate(data_loader)):
+        with torch.inference_mode():
+            original, mutated, original_index, mutated_index, ori_div_list = store_batch
+            original = original.to(sae.device)
+            ori_latents_pre_act, ori_latents, ori_recons = sae(original)
+            mutated = mutated.to(sae.device)
+            mut_latents_pre_act, mut_latents, mut_recons = sae(mutated)
+            
+            total_loss = loss_fn(ori_recons, original) + loss_fn(mut_recons, mutated)
             cur_loss = total_loss.detach().cpu().item()
             loss_list.append(cur_loss)
     return np.average(loss_list)
@@ -150,6 +247,10 @@ def main(
     clip_grad = config_dict["task_config"].get("clip_grad", False)
     wandb_info = config_dict["task_config"].get("wandb_info", None)
     scheduler_type = config_dict["task_config"].get("scheduler_type", None)
+    num_workers = config_dict["task_config"].get("num_workers", 4)
+    prefetch_factor = config_dict["task_config"].get("prefetch_factor", 2)
+    store_type = config_dict["task_config"].get("store_type", "naive")
+    assert store_type in ["naive", "varied"]
     tied = config_dict["task_config"].get("tied", False) 
     model_save_freq_prop = config_dict["task_config"].get("model_save_freq_prop", 1)
     model_save_freq = max(int(epoch_num * model_save_freq_prop), 1)
@@ -173,15 +274,18 @@ def main(
     sae = sae.to(device)
     
     
-    store = NaiveTensorStore.load_from_disk(storage_path)
+    if store_type == "naive":
+        store = NaiveTensorStore.load_from_disk(storage_path)
+    else:
+        store = VariedKeyTensorStore.load_from_disk(storage_path)
     
     #optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, sae.parameters()), lr=learning_rate,  eps=eps)
     optimizer = torch.optim.AdamW(sae.parameters(), lr=learning_rate,  eps=eps)
     #data_loader =  DataLoader(store, batch_size=batch_size, collate_fn=get_collate_fn(feature_name), shuffle=True)
-    data_loader = store.get_data_loader(batch_size, feature_name, shuffle=True)
+    data_loader = store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor)
     if scheduler_type == "cos":
         training_step = len(data_loader) * epoch_num
-        warmup_step = math.floor(training_step * 0.1) # Hard-code. 
+        warmup_step = math.floor(training_step * 0.1) # Hard-code. TODO: Improve this. 
         scheduler = transformers.get_cosine_schedule_with_warmup(optimizer=optimizer, 
                                                                 num_warmup_steps=warmup_step,
                                                                 num_training_steps=training_step)
@@ -229,6 +333,9 @@ def main(
             "Eval loss": eval_loss,
             "model_param": torchinfo.summary(sae).trainable_params
     })
+        
+    end = time.time()
+    logger.info(f"Total time: {end - start}")
     
 if __name__ == "__main__":
     typer.run(main)

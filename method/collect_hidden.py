@@ -30,11 +30,11 @@ def remove_empty_lines(input_string):
 
 def remove_item_from_dataset(dataset: datasets.dataset_dict.DatasetDict, idx):
     if isinstance(idx, int):
-        idx = [idx]
+        idx_set = set([idx])
     dataset = dataset.select(
         (
             i for i in range(len(dataset)) 
-            if i not in set(idx)
+            if i not in idx_set
         )
     )
     return dataset

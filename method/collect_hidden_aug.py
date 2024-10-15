@@ -73,6 +73,7 @@ class AugPretrainCodedata(PretrainCodedata):
             new_mutated_code_split_pos: List[int]. The split position ("\n") of the mutated code.
             labels: List[int]. The label of each code line.
             contrastive_pair: List[List]. The contrastive pair of the original and mutated code. Could contain repeated index.
+                The item inside the list refers to the position relative to the code_split_pos.
         """
         new_mutated = ""
         new_mutated_code_split_pos = []
@@ -109,7 +110,8 @@ class AugPretrainCodedata(PretrainCodedata):
                     # labels[-1] = self.mutated_label
                     #mutated_recorder.append(DROP)
                     drop_label_idx_recorder.append(len(new_mutated_code_split_pos))
-                contrastive_original.append(now_split_pos)
+                #contrastive_original.append(now_split_pos)
+                contrastive_original.append(idx)
                 mutated_pos_index_list.append(len(new_mutated_code_split_pos)-1)
                 last_split_pos = code_split_pos[idx]
                 mutated_pointer += 1
@@ -139,12 +141,18 @@ class AugPretrainCodedata(PretrainCodedata):
             logger.error("new_mutated", new_mutated)
             logger.error("original code", code)
             raise Exception
+        drop_repeat_map = dict()
         for drop_idx in drop_label_idx_recorder:
             drop_idx = min(drop_idx, len(labels)-1)
+            if drop_idx not in drop_repeat_map:
+                drop_repeat_map[drop_idx] = 1
+            if labels[drop_idx] == self.mutated_label:
+                drop_repeat_map[drop_idx] += 1
             labels[drop_idx] = self.mutated_label
         for idx, label in enumerate(labels):
             if label == self.mutated_label:
-                contrastive_mutated.append(new_mutated_code_split_pos[idx])
+                contrastive_mutated += [idx] * drop_repeat_map.get(idx, 1)
+        assert len(contrastive_original) == len(contrastive_mutated)
         return new_mutated, new_mutated_code_split_pos, labels, [contrastive_original, contrastive_mutated]
 
     def aug_data_single(self, index):
@@ -173,11 +181,13 @@ class AugPretrainCodedata(PretrainCodedata):
                 "code": new_mutated,
                 "code_split_pos": new_mutated_code_split_pos,
                 "line_label": labels,
-                "contrastive_pair": contrastive_pair
+                "contrastive_pair": contrastive_pair,
+                "mutated_op_list": mutated_op_list
             }
         return item_list
     
     def aug_data_all(self):
+        # TODO: Introduce multi-processing
         if not self.preprocess_all_in_memory:
             self._preprocess_data()
             self.preprocess_all_in_memory = True
@@ -256,63 +266,133 @@ class AugPretrainCodedata(PretrainCodedata):
         if self.preprocess_all_in_memory:
             for item in self.processed_data:
                 token_num += len(item['output']['code_split_pos'])
+                token_num += len(item['mutated_code']['code_split_pos'])
         else:
-            for item in self.data:
-                item = self._preprocess_data(item)
-                for key in self.feature_key_list:
-                    token_num += len(item['output'][key]['code_split_pos'])
+            for idx, item in enumerate(self.data):
+                item_list = self.aug_data_single(idx)
+                for item in item_list:
+                    token_num += len(item['output']['code_split_pos'])
+                    token_num += len(item['mutated_code']['code_split_pos'])
         return token_num
 
+def wrap_input(item, code, code_split_pos, tokenizer, split_token, contrastive_list):
+    def adjust_indices(sub_indicator_list, removal_indices):
+        # Create a set for fast lookup of removal indices
+        removal_indices_set = set(removal_indices)
+        
+        # Adjust sub_indicator_list by accounting for removed indices
+        adjusted_sub_indicator_list = []
+        for index in sub_indicator_list:
+            # If the index was removed, skip it
+            if index in removal_indices_set:
+                continue
+            
+            # Count how many previous elements have been removed before the current index
+            shift = sum(1 for ri in removal_indices if ri < index)
+            
+            # Adjust the index by subtracting the number of removed elements before it
+            adjusted_sub_indicator_list.append(index - shift)
+        
+        return adjusted_sub_indicator_list
+    
+    context = item['context']
+    code_description = item['output']['code_description']
+    problem_description = item['output']['problem_description']
+    description = problem_description + code_description
+    target_input = context + description + "\n```\n" + code
+    context_str_len = len(context + description + "\n```\n")
+    input_info = tokenizer(target_input, return_tensors="pt", return_offsets_mapping=True)
+    offset_mapping = input_info["offset_mapping"].squeeze().tolist()
+    input_info.pop("offset_mapping")
+    split_tok_pos = list()
+    removal_indices = list()
+    for idx, pos in enumerate(code_split_pos):
+        real_pos = pos + context_str_len
+        try:
+            split_tok_pos.append(utils.match_token_in_offset_mapping(offset_mapping, real_pos, real_pos+len(split_token))[0])
+        except:
+            logger.warning(f"Cannot find split token for {pos} in {item['id']}")
+            removal_indices.append(idx)
+            continue
+    if len(split_tok_pos) == 0:
+        split_tok_pos = [-1]
+    
+    contrastive_list = adjust_indices(contrastive_list, removal_indices)
+    return input_info, split_tok_pos, contrastive_list
+    
 def inference_and_collect(
     dataset,
     recorder,
     tokenizer,
-    store
+    store,
+    run_original: bool,
 ):
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=lambda x:x)
-    for item in tqdm.tqdm(data_loader):
+    for idx, item in enumerate(tqdm.tqdm(data_loader)):
         item = item[0]
-        context = item['context']
-        code_description = item['output']['code_description']
-        problem_description = item['output']['problem_description']
-        description = problem_description + code_description
-        code = item['output']['code']
-        target_input = context + description + "\n```\n" + code
-        context_str_len = len(context + description + "\n```\n")
-        input_info = tokenizer(target_input, return_tensors="pt", return_offsets_mapping=True)
-        offset_mapping = input_info["offset_mapping"].squeeze().tolist()
-        input_info.pop("offset_mapping")
-        split_tok_pos = list()
-        for pos in item['output']['code_split_pos']:
-            real_pos = pos + context_str_len
-            try:
-                split_tok_pos.append(utils.match_token_in_offset_mapping(offset_mapping, real_pos, real_pos+len(dataset.split_token))[0])
-            except:
-                logger.warning(f"Cannot find split token for {pos} in {item['id']}")
-                continue
-        if len(split_tok_pos) == 0:
-            split_tok_pos = [-1]
+        input_info, original_split_tok_pos, contrastive_list_original = wrap_input(item, 
+                                                                        item['output']['code'],
+                                                                        item['output']['code_split_pos'], 
+                                                                        tokenizer, 
+                                                                        dataset.split_token, 
+                                                                        item['mutated_code']['contrastive_pair'][0]
+                                                                )
+        if run_original:
+            _, record_dict = recorder.forward(input_info)
+            
+            hidden_states = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
+            hidden_states = hidden_states[0] # (1, token_num, hidden_size)
+            hidden_states = hidden_states[0, original_split_tok_pos, :] # (split_token_num, hidden_size)
+            recorder.clear_cache()
+            
+            store_info = {
+                "original": {"hidden_states": hidden_states},
+            }
+        else:
+            store_info = store[idx]
+        if "mutated_code" not in store_info:
+            store_info["mutated_code"] = {}
+        
+        input_info, mutated_split_tok_pos, contrastive_list_mutated = wrap_input(item,
+                                                                                 item['mutated_code']['code'],
+                                                                                 item['mutated_code']['code_split_pos'],
+                                                                                 tokenizer,
+                                                                                 dataset.split_token,
+                                                                                 item['mutated_code']['contrastive_pair'][1]
+                                                                                 )
         _, record_dict = recorder.forward(input_info)
         
-
         hidden_states = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
         hidden_states = hidden_states[0] # (1, token_num, hidden_size)
-        hidden_states = hidden_states[0, split_tok_pos, :] # (split_token_num, hidden_size)
-        recorder.clear_cache()
-        for i in range(hidden_states.shape[0]):
-            store.append({"extracted_states": hidden_states[i], "labels": 1})
+        hidden_states = hidden_states[0, mutated_split_tok_pos, :] # (split_token_num, hidden_size)
+        
+        key_list = [int(i) for i in list(store_info["mutated_code"].keys())]
+        if len(key_list) == 0:
+            cur_key = str(0)
+        else:
+            cur_key = max(key_list) + 1
+            cur_key = str(cur_key)
+        store_info["mutated_code"][cur_key] = {"hidden_states": hidden_states, 
+                                               "contrastive_list_original": contrastive_list_original,
+                                               "contrastive_list_mutated": contrastive_list_mutated, 
+                                               "line_label": item['mutated_code']['line_label']}
+        if run_original:
+            store.append(store_info)
+        else:
+            store.set_item(idx, store_info)
     
     store.save_to_disk()
             
             
         
-# python3 collect_hidden.py --config-file model_eval_config/CodeLlama_hidden_state.yaml --result-output-path /data/huangyuheng/trust_code/codellama34b/hidden_state
+# python3 method/collect_hidden_aug.py --config-file model_eval_config/CodeLlama_hidden_state.yaml --result-output-path /data/data_disk/trust_code/leetcode_aug3_fix
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 @app.command()
 def main(
     config_file: Annotated[Path, typer.Option()],
     result_output_path: Annotated[Path, typer.Option()],
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
+    #aug_times: Annotated[int, typer.Option("--aug-times")] = 1
 ):
     start = time.time()
     # ===== Load configuration =====
@@ -321,11 +401,10 @@ def main(
     model_name = config_dict["llm_config"]["model_name"]
     quantization = config_dict["llm_config"]["quantization"]
     hidden_layer = config_dict["task_config"]["hidden_layer"]
-    hidden_neuron = config_dict["task_config"]["hidden_neuron"]
     split_token = config_dict['task_config']["split_token"]
     dataset_name = config_dict['task_config']["dataset_name"]
+    mutation_prop = (config_dict['task_config']["mutation_prop"])
     feature_key_list = config_dict['task_config']["feature_key_list"]
-    store_storage_multiplier = config_dict['task_config']["store_storage_multiplier"]
     
     cache_dir = None
     if "HF_HOME" in config_dict["system_setting"]:
@@ -338,29 +417,45 @@ def main(
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
     recorder = extract_util.TransHookRecorder({hidden_layer: {"return_first": True}}, model, mode="plain")
     
-    data = PretrainCodedata(
+    aug_times = len(mutation_prop)
+    data = AugPretrainCodedata(
+        float(mutation_prop[0]),
         dataset_name,
         feature_key_list,
         preprocess_all_in_memory=True,
         split_token=split_token
     )
-    instance_real_num = data.compute_all_inference_num()
-    store = naive_store.NaiveTensorStore()
+    #instance_real_num = data.compute_all_inference_num()
+    #store = naive_store.NaiveTensorStore()
+    store = naive_store.VariedKeyTensorStore()
     store.init(
-        allocated_size = round(instance_real_num * store_storage_multiplier), 
-        config = {
-                "extracted_states": {"shape": (hidden_neuron), "dtype": "float"},
-                "labels": {"shape": (), "dtype": "int"}
-            },
         save_dir = result_output_path
-        )
+    )
     
     inference_and_collect(
         data,
         recorder,
         tokenizer,
-        store
+        store,
+        True
     )
+    
+    for i in range(1, aug_times):
+        # dataset.aug_data_all()
+        data = AugPretrainCodedata(
+        float(mutation_prop[i]),
+        dataset_name,
+        feature_key_list,
+        preprocess_all_in_memory=True,
+        split_token=split_token
+    )
+        inference_and_collect(
+            data,
+            recorder,
+            tokenizer,
+            store,
+            False
+        )
     
     end = time.time()
     logger.info(f"Total time: {end - start}")

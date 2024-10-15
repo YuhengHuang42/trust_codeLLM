@@ -70,13 +70,13 @@ class NaiveTensorStore(Dataset):
     def save_to_disk(self, save_dir=None):
         if save_dir is None:
             save_dir = self.save_dir
-        meta_name = os.path.join(save_dir, self.meta_name)
-        with open(meta_name, 'w') as f:
+        meta_path = os.path.join(save_dir, self.meta_name)
+        with open(meta_path, 'w') as f:
             json.dump({
                 'allocated_size': self.allocated_size,
                 'config': self.config,
-                'memmap_name': self.memmap_name,
-                'meta_name': self.meta_name,
+                'memmap_name': str(self.memmap_name),
+                'meta_name': str(self.meta_name),
                 "save_pointer": self.save_pointer
             }, f)
         self.data.memmap_()
@@ -100,7 +100,11 @@ class NaiveTensorStore(Dataset):
         if self.save_dir is not None:
             self.save_to_disk()
     
-    def get_data_loader(self, batch_size, feature_name, shuffle):
+    def get_data_loader(self, batch_size, feature_name, shuffle, num_workers, prefetch_factor=2):
+        """
+        This function is not class-specific but task-specific.
+        But it is put here for interface convenience. 
+        """
         def get_collate_fn(feature_name):
             def collate_fn(batch):
                 feature = []
@@ -113,7 +117,12 @@ class NaiveTensorStore(Dataset):
                 labels = torch.stack(labels)
                 return (return_x, labels)
             return collate_fn
-        data_loader =  DataLoader(self, batch_size=batch_size, collate_fn=get_collate_fn(feature_name), shuffle=shuffle)
+        data_loader =  DataLoader(self, 
+                                  batch_size=batch_size, 
+                                  collate_fn=get_collate_fn(feature_name), 
+                                  shuffle=shuffle, 
+                                  num_workers=num_workers, 
+                                  prefetch_factor=prefetch_factor)
         return data_loader
         
 
@@ -148,13 +157,13 @@ class VariedKeyTensorStore(Dataset):
         if self.data is not None:
             if save_dir is None:
                 save_dir = self.save_dir
-            meta_name = os.path.join(save_dir, self.meta_name)
-            with open(meta_name, 'w') as f:
+            meta_path = os.path.join(save_dir, self.meta_name)
+            with open(meta_path, 'w') as f:
                 json.dump({
-                    'meta_name': self.meta_name,
+                    'meta_name': str(self.meta_name),
                     "save_pointer": self.save_pointer,
-                    "save_dir": self.save_dir,
-                    "shelve_name": self.shelve_name,
+                    "save_dir": str(self.save_dir),
+                    "shelve_name": str(self.shelve_name),
                     "index": self.index
                 }, f)
         
@@ -172,12 +181,18 @@ class VariedKeyTensorStore(Dataset):
         self.index.append(str(self.save_pointer))
         self.save_pointer += 1
 
-    def set_item(self, idx, item): 
+    def set_item(self, idx, item: dict, overwrite=False):
+        # If do not overwrite
+        # The storage will leave the original data as it is 
         if isinstance(idx, int):
             assert str(idx) in self.index
+            real_idx = self.index[idx]
             self.data[self.index[idx]] = item
         else:
-            self.data[idx] = item
+            real_idx = idx
+        if overwrite:
+            self.data.del_(real_idx)
+        self.data[real_idx] = item
     
     def keys(self):
         return self.index
@@ -201,4 +216,49 @@ class VariedKeyTensorStore(Dataset):
         if path is None:
             path = os.path.join(self.save_dir, self.shelve_name)
         self.data = PersistentTensorDict(filename=path, mode="a")
-    
+
+    def get_data_loader(self, batch_size, feature_name, shuffle, num_workers, prefetch_factor=2):
+        """
+        This function is not class-specific but task-specific.
+        But it is put here for interface convenience. 
+        """
+        def collate_fn(batch_info):
+            """
+            Collate multiple data points into one batch.
+            Return:
+                original: Collected states of original code. 
+                    Shape: (N, hidden_dim), where N is the sum of collected states in the given batch.
+                mutated: Collected states of mutated code.
+                    Shape: (M, hidden_dim), where M is the sum of collected states in the given batch.
+                original_index: the index used in original for contrastive learning
+                    shape: (Num), where Num is the number of instances in the given batch.
+                mutated_index: the index used in mutated code for contrastive learning
+                    shape: (Num), where Num is the number of instances in the given batch.
+                ori_div_list: last token index of every original code instance in the batch 
+            """
+            original = list()
+            mutated = list()
+            original_index = []
+            mutated_index = []
+            original_shift_pointer = 0
+            ori_div_list = []
+            mutated_shift_pointer = 0
+            for item in batch_info:
+                item = item.to_dict()
+                original.append(item["original"]["hidden_states"])
+                original_length = item["original"]["hidden_states"].shape[0]
+                for key in item["mutated_code"]:
+                    original_index.append(original_shift_pointer + item["mutated_code"][key]["contrastive_list_original"])
+                    mutated_index.append(mutated_shift_pointer + item["mutated_code"][key]["contrastive_list_mutated"])
+                    mutated.append(item["mutated_code"][key]["hidden_states"])
+                    mutated_shift_pointer += item["mutated_code"][key]["hidden_states"].shape[0]
+                original_shift_pointer += original_length
+                ori_div_list.append(original_shift_pointer - 1)
+            return torch.cat(original), torch.cat(mutated), torch.cat(original_index), torch.cat(mutated_index), torch.tensor(ori_div_list)
+        data_loader =  DataLoader(self, 
+                                  batch_size=batch_size, 
+                                  collate_fn=collate_fn, 
+                                  shuffle=shuffle, 
+                                  num_workers=num_workers, 
+                                  prefetch_factor=prefetch_factor)
+        return data_loader
