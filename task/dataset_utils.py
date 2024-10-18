@@ -139,7 +139,7 @@ def find_code_block_positions(original_string, sub_string, filter_language=None)
     # Return the list of matched positions as tuples (start_line, end_line)
     return matches
 
-def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1, filter_language=None):
+def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1, filter_language=None, without_filter=False):
     """
     Collect all buggy positions according to raw_buggy_code
     ---
@@ -153,8 +153,13 @@ def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1
     """
     # The last one is the fully runnable code
     # The second-last one is the text description
-    code_block, code_block_info = utils.extract_code_block(raw_buggy_code, None)
-    buggy_code_list = code_block[:-2] # Skip the Indicator and runnable code.
+    if without_filter is False:
+        code_block, code_block_info = utils.extract_code_block(raw_buggy_code, None)
+        buggy_code_list = code_block[:-2] # Skip the Indicator and runnable code.
+    else:
+        buggy_code_list = [raw_buggy_code]
+        
+    #buggy_code_list = code_block[:-2] # Skip the Indicator and runnable code.
     result = list()
     if len(buggy_code_list) == 0:
         return result

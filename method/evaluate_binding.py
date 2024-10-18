@@ -110,6 +110,7 @@ def main(
     config_file: Annotated[Path, typer.Option()],
     result_output_path: Annotated[Path, typer.Option()],
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
+    detection_model_path: Annotated[Path, typer.Option()] = None,
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
@@ -123,7 +124,9 @@ def main(
     quantization = config_dict["llm_config"]["quantization"]
     layer = config_dict["task_config"]["layer"]
     language = config_dict["task_config"]["language"]
-    detection_model_path = config_dict["task_config"]["detection_model_path"]
+    if detection_model_path is None:
+        # Fallback policy
+        detection_model_path = config_dict["task_config"]["detection_model_path"]
     mode = config_dict["task_config"]["mode"]
     max_profile_token_length = config_dict["task_config"]["max_profile_token_length"]
     extract_code = config_dict["task_config"]["extract_code"]

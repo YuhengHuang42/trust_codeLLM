@@ -12,7 +12,7 @@ import math
 import os
 import torchinfo
 
-from sae_model import Autoencoder, TopK, normalized_mean_squared_error
+from sae_model import Autoencoder, TopK, normalized_mean_squared_error, contrastive_loss
 from extract.naive_store import NaiveTensorStore, VariedKeyTensorStore
 
 def compute_grad_norm(model):
@@ -222,7 +222,7 @@ def evaluate_contrastive(sae, data_loader, loss_fn):
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 
-# python sae_training.py --config-file model_eval_config/CodeLlama_autoencoder.yaml --result-output-path /data/huangyuheng/trust_code/codellama34b/sae/model
+# python sae_training.py --config-file model_eval_config/CodeLlama_autoencoder.yaml --result-output-path /data/huangyuheng/trust_code/codellama34b/sae/contrastive_model
 @app.command()
 def main(
     config_file: Annotated[Path, typer.Option()],
@@ -251,6 +251,8 @@ def main(
     prefetch_factor = config_dict["task_config"].get("prefetch_factor", 2)
     store_type = config_dict["task_config"].get("store_type", "naive")
     assert store_type in ["naive", "varied"]
+    contrastive = config_dict["task_config"].get("contrastive", False)
+    cold_start_epoch = config_dict["task_config"].get("cold_start_epoch", 1)
     tied = config_dict["task_config"].get("tied", False) 
     model_save_freq_prop = config_dict["task_config"].get("model_save_freq_prop", 1)
     model_save_freq = max(int(epoch_num * model_save_freq_prop), 1)
@@ -277,8 +279,9 @@ def main(
     if store_type == "naive":
         store = NaiveTensorStore.load_from_disk(storage_path)
     else:
-        store = VariedKeyTensorStore.load_from_disk(storage_path)
-    
+        store = VariedKeyTensorStore.load_from_disk(storage_path, open_mode="r")
+        
+    logger.info("Storage Ready")
     #optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, sae.parameters()), lr=learning_rate,  eps=eps)
     optimizer = torch.optim.AdamW(sae.parameters(), lr=learning_rate,  eps=eps)
     #data_loader =  DataLoader(store, batch_size=batch_size, collate_fn=get_collate_fn(feature_name), shuffle=True)
@@ -292,6 +295,7 @@ def main(
     else:
         scheduler = None
     loss_fn = normalized_mean_squared_error
+    contrastive_loss_fn = contrastive_loss
     if wandb_info is not None:
         wandb.login(key=wandb_info["key"])
         wandb_proj_name = wandb_info["proj_name"]
@@ -301,17 +305,36 @@ def main(
         wandbrun = None
     all_loss_list = []
     for epoch in range(epoch_num):
-        sae, loss_list = training_one_epoch(sae, 
-                                            data_loader, 
-                                            optimizer, 
-                                            loss_fn, 
-                                            epoch,
-                                            path=result_output_path,
-                                            print_freq_prop=print_freq_prop, 
-                                            scheduler=scheduler, 
-                                            wandb_handle=wandbrun,
-                                            clip_grad=clip_grad
-                                        )
+        if contrastive is False:
+            sae, loss_list = training_one_epoch(sae, 
+                                                data_loader, 
+                                                optimizer, 
+                                                loss_fn, 
+                                                epoch,
+                                                path=result_output_path,
+                                                print_freq_prop=print_freq_prop, 
+                                                scheduler=scheduler, 
+                                                wandb_handle=wandbrun,
+                                                clip_grad=clip_grad
+                                            )
+        else:
+            if cold_start_epoch > epoch:
+                c_loss_fn = None
+            else:
+                c_loss_fn = contrastive_loss_fn
+                logger.info("Enable contrastive loss based training")
+            sae, loss_list = training_one_epoch_contrastive(sae,
+                                                            data_loader,
+                                                            optimizer,
+                                                            recon_loss_fn=loss_fn,
+                                                            contrastive_loss_fn=c_loss_fn,
+                                                            epoch=epoch,
+                                                            path=result_output_path,
+                                                            print_freq_prop=print_freq_prop,
+                                                            scheduler=scheduler,
+                                                            wandb_handle=wandbrun,
+                                                            clip_grad=clip_grad,
+                                                            )
         all_loss_list += loss_list
         if epoch % model_save_freq == 0 or epoch == epoch_num - 1:
              torch.save(
@@ -327,7 +350,10 @@ def main(
              sae = sae.to(device)
         logger.info(f'Epoch: [{epoch}] Finished. Loss: {np.average(loss_list)}\t')
 
-    eval_loss = evaluate(sae, data_loader, loss_fn)
+    if contrastive is False:
+        eval_loss = evaluate(sae, data_loader, loss_fn)
+    else:
+        eval_loss = evaluate_contrastive(sae, data_loader, loss_fn)
     if wandb_info is not None:
         wandb.log({
             "Eval loss": eval_loss,

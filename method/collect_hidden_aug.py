@@ -12,6 +12,7 @@ import time
 import copy
 import random
 import math
+import pandas as pd 
 
 import sys
 project_root = Path(__file__).resolve().parent.parent
@@ -194,7 +195,6 @@ class AugPretrainCodedata(PretrainCodedata):
         for idx in tqdm.tqdm(range(len(self.processed_data))):
             self.processed_data[idx] = self.aug_data_single(idx)[0]
             
-    
     def select_line_according_to_split(self, code, previous_pos, cur_pos):
         real_start_pos = previous_pos + len(self.split_token) if previous_pos >= 0 else 0
         return code[real_start_pos: cur_pos+len(self.split_token)]
@@ -242,7 +242,6 @@ class AugPretrainCodedata(PretrainCodedata):
                     return select_line
         return ""
         
-    
     def delete_line(self):
         return ""
     
@@ -275,25 +274,149 @@ class AugPretrainCodedata(PretrainCodedata):
                     token_num += len(item['mutated_code']['code_split_pos'])
         return token_num
 
-def wrap_input(item, code, code_split_pos, tokenizer, split_token, contrastive_list):
-    def adjust_indices(sub_indicator_list, removal_indices):
-        # Create a set for fast lookup of removal indices
-        removal_indices_set = set(removal_indices)
+class AugExecCodeData(Dataset):
+    def __init__(self, 
+                 data_path, 
+                 tokenizer,
+                 split_token="\n",
+                 additional_prompt="", 
+                 max_length=2048):
+        self.data_path = data_path
+        self.raw_data = pd.read_csv(data_path, index_col=0)
+        self.error_code = self.raw_data['sourceText']
+        self.correct_code = self.raw_data["targetText"]
+        self.sourceLineText = self.raw_data["sourceLineText"]
+        self.targetLineText = self.raw_data["targetLineText"]
+        self.error_linenum = [i - 1 for i in self.raw_data['lineNums_Abs']] # From 1-based to 0-based
+        self.error_info = self.raw_data['sourceErrorClangParse']
+        self.tokenizer = tokenizer
+        self.split_token = split_token
+        self.token_output = []
+        self.additional_prompt = additional_prompt
+        max_length = min(max_length, tokenizer.model_max_length)
+        if len(additional_prompt) > 0:
+            inputs = tokenizer(additional_prompt, return_tensors="pt")
+            self.input_length = inputs["input_ids"].shape[-1]
+        else:
+            self.input_length = 0
+        drop_list = []
+        for idx in range(len(self.error_code)):
+            input_str = additional_prompt + self.error_code[idx]
+            input_ids = tokenizer(input_str, return_tensors="pt", truncation=True, max_length=max_length)['input_ids']
+            if len(input_ids) >= max_length:
+                drop_list.append(idx)
+            self.token_output.append(input_ids)
         
-        # Adjust sub_indicator_list by accounting for removed indices
-        adjusted_sub_indicator_list = []
-        for index in sub_indicator_list:
-            # If the index was removed, skip it
-            if index in removal_indices_set:
+        self.error_code = [value for i, value in enumerate(self.error_code) if i not in drop_list]
+        self.correct_code = [value for i, value in enumerate(self.correct_code) if i not in drop_list]
+        self.error_linenum = [value for i, value in enumerate(self.error_linenum) if i not in drop_list]
+        self.error_info = [value for i, value in enumerate(self.error_info) if i not in drop_list]
+        self.token_output = [value for i, value in enumerate(self.token_output) if i not in drop_list]
+        self.sourceLineText = [value for i, value in enumerate(self.sourceLineText) if i not in drop_list]
+        self.targetLineText = [value for i, value in enumerate(self.targetLineText) if i not in drop_list]
+        self.raw_data = self.raw_data.drop(index=drop_list).reset_index(drop=True)
+
+        self.error_split_pos = []
+        self.correct_split_pos = []
+        drop_list = []
+        for idx in range(len(self.error_code)):
+            code = self.error_code[idx]
+            processed_split_pos, remove_index = self._obtain_split_pos(code)
+            self.error_split_pos.append(processed_split_pos)
+            error_linenums = adjust_indices([self.error_linenum[idx]], remove_index)
+            if len(error_linenums) < 1:
+                drop_list.append(idx)
+                self.error_linenum[idx] = -1
+            else:
+                self.error_linenum[idx] = error_linenums[0]
+            correct_code = self.correct_code[idx]
+            processed_split_pos, remove_index = self._obtain_split_pos(correct_code)
+            self.correct_split_pos.append(processed_split_pos)
+        
+
+        self.error_code = [value for i, value in enumerate(self.error_code) if i not in drop_list]
+        self.correct_code = [value for i, value in enumerate(self.correct_code) if i not in drop_list]
+        self.error_linenum = [value for i, value in enumerate(self.error_linenum) if i not in drop_list]
+        self.error_info = [value for i, value in enumerate(self.error_info) if i not in drop_list]
+        self.token_output = [value for i, value in enumerate(self.token_output) if i not in drop_list]
+        self.sourceLineText = [value for i, value in enumerate(self.sourceLineText) if i not in drop_list]
+        self.targetLineText = [value for i, value in enumerate(self.targetLineText) if i not in drop_list]
+        self.raw_data = self.raw_data.drop(index=drop_list).reset_index(drop=True)
+        self.error_split_pos = [value for i, value in enumerate(self.error_split_pos) if i not in drop_list]
+        self.correct_split_pos = [value for i, value in enumerate(self.correct_split_pos) if i not in drop_list]
+
+    
+    def _obtain_split_pos(self, code):
+        split_pos = utils.find_all_occurrences(self.split_token, code)
+        previous_pos = 0
+        processed_split_pos = []
+        remove_index = []
+        for idx, pos in enumerate(split_pos):
+            if code[previous_pos:pos].strip() == "":
+                previous_pos = pos
+                remove_index.append(idx)
                 continue
-            
-            # Count how many previous elements have been removed before the current index
-            shift = sum(1 for ri in removal_indices if ri < index)
-            
-            # Adjust the index by subtracting the number of removed elements before it
-            adjusted_sub_indicator_list.append(index - shift)
+            else:
+                processed_split_pos.append(pos)
+                previous_pos = pos
+        return processed_split_pos, remove_index
+    
+    def __getitem__(self, idx):
+        return_data = {
+            "context": self.additional_prompt,
+            "output": {
+                "code_description": "",
+                "problem_description": "",
+                "code": self.correct_code[idx],
+                "code_split_pos": self.correct_split_pos[idx],
+            },
+            "mutated_code": {
+                "code": self.error_code[idx],
+                "contrastive_pair": [[self.error_linenum[idx]], [self.error_linenum[idx]]],
+                "code_split_pos": self.error_split_pos[idx],
+            },
+            "correct_code": self.correct_code[idx],
+            "error_linenum": self.error_linenum[idx],
+            "error_info": self.error_info[idx],
+            "token_output": self.token_output[idx],
+            "input_length": self.input_length
+        }
+        return return_data
+    
+    def __len__(self):
+        return len(self.raw_data)
+    
+    def get_important_line_info(self):
+        result = dict()
+        for idx in range(len(self.error_linenum)):
+            result[idx] = [
+                [self.error_linenum[idx]]
+            ]
+        return result
+    
+    def keys(self):
+        return [i for i in range(len(self.error_code))]
+
+def adjust_indices(sub_indicator_list, removal_indices):
+    # Create a set for fast lookup of removal indices
+    removal_indices_set = set(removal_indices)
+    
+    # Adjust sub_indicator_list by accounting for removed indices
+    adjusted_sub_indicator_list = []
+    for index in sub_indicator_list:
+        # If the index was removed, skip it
+        if index in removal_indices_set:
+            continue
         
-        return adjusted_sub_indicator_list
+        # Count how many previous elements have been removed before the current index
+        shift = sum(1 for ri in removal_indices if ri < index)
+        
+        # Adjust the index by subtracting the number of removed elements before it
+        adjusted_sub_indicator_list.append(index - shift)
+    
+    return adjusted_sub_indicator_list
+
+def wrap_input(item, code, code_split_pos, tokenizer, split_token, contrastive_list):
     
     context = item['context']
     code_description = item['output']['code_description']

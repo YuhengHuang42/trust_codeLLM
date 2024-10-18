@@ -1,5 +1,6 @@
 import numpy as np
 from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
 import joblib
 from sklearn import svm
 import torch
@@ -76,6 +77,8 @@ class EncoderClassifier():
             self.clf = LogisticRegression(**fit_model_param).fit(train_x, train_y)
         elif self.model_type.lower() == "svm":
             self.clf = svm.SVC(probability=True, **fit_model_param).fit(train_x, train_y)
+        elif self.model_type.lower() == "mlp":
+            self.clf = MLPClassifier(**fit_model_param).fit(train_x, train_y)
         
     def save(self, path):
         encoder_device = self.encoder.device

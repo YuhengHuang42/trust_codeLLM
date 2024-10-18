@@ -243,6 +243,16 @@ def normalized_mean_squared_error(
     ).mean()
 
 
+def contrastive_loss(original: torch.Tensor, 
+                     mutated: torch.Tensor, 
+                     norm=True, 
+                     margin=2.0):
+    if norm == True:
+        original = original / torch.norm(original, p=2)
+        mutated = mutated / torch.norm(mutated, p=2)
+    loss = max(0, margin - torch.dist(original, mutated))
+    return loss
+
 def normalized_L1_loss(
     latent_activations: torch.Tensor,
     original_input: torch.Tensor,
