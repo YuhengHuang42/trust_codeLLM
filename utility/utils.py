@@ -67,7 +67,7 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
     # https://huggingface.co/docs/transformers/v4.44.2/en/main_classes/text_generation#transformers.GenerationMixin.generate
     # https://huggingface.co/docs/transformers/v4.44.2/en/main_classes/text_generation#transformers.GenerationConfig
     
-    inputs = tokenizer(input_str, return_tensors="pt").to(llm.device)
+    inputs = tokenizer(input_str, return_tensors="pt", max_length=tokenizer.model_max_length, truncation=True).to(llm.device)
     input_length = inputs["input_ids"].shape[-1]
     result = {"input_length": input_length}
     if "return_dict_in_generate" in generate_config:

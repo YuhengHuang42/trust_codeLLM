@@ -13,6 +13,7 @@ import copy
 import random
 import math
 import pandas as pd 
+import numpy as np
 
 import sys
 project_root = Path(__file__).resolve().parent.parent
@@ -33,6 +34,10 @@ def remove_empty_lines(input_string):
     # Join the non-empty lines back into a single string
     return "\n".join(non_empty_lines)
 
+def select_line_according_to_split(split_token, code, previous_pos, cur_pos):
+    real_start_pos = previous_pos + len(split_token) if previous_pos >= 0 else 0
+    return code[real_start_pos: cur_pos+len(split_token)]
+    
 class AugPretrainCodedata(PretrainCodedata):
     def __init__(self,
                  mutate_prop: float, 
@@ -95,9 +100,9 @@ class AugPretrainCodedata(PretrainCodedata):
                 # Mutate the code
                 op = mutated_op_list[mutated_pointer]
                 if op == "switch_inside":
-                    cur_code = self.switch_inside(code, code_split_pos, idx, self.select_line_according_to_split(code, last_split_pos, now_split_pos))
+                    cur_code = self.switch_inside(code, code_split_pos, idx, select_line_according_to_split(self.split_token, code, last_split_pos, now_split_pos))
                 elif op == "switch_outside":
-                    cur_code = self.switch_outside(idx, self.select_line_according_to_split(code, last_split_pos, now_split_pos))
+                    cur_code = self.switch_outside(idx, select_line_according_to_split(self.split_token, code, last_split_pos, now_split_pos))
                 elif op == "delete_line":
                     cur_code = self.delete_line()
                 new_mutated += cur_code
@@ -121,7 +126,7 @@ class AugPretrainCodedata(PretrainCodedata):
                 # split_pos records the exact position of "\n"
                 # To include the actual code line, we need to add the length of split_token ("\n")
                 #cur_code = code[last_split_pos+len(self.split_token): now_split_pos+len(self.split_token)]
-                cur_code = self.select_line_according_to_split(code, last_split_pos, now_split_pos)
+                cur_code = select_line_according_to_split(self.split_token, code, last_split_pos, now_split_pos)
                 new_mutated += cur_code
                 new_mutated_code_split_pos.append(len(new_mutated)-1)
                 last_split_pos = code_split_pos[idx]
@@ -195,9 +200,6 @@ class AugPretrainCodedata(PretrainCodedata):
         for idx in tqdm.tqdm(range(len(self.processed_data))):
             self.processed_data[idx] = self.aug_data_single(idx)[0]
             
-    def select_line_according_to_split(self, code, previous_pos, cur_pos):
-        real_start_pos = previous_pos + len(self.split_token) if previous_pos >= 0 else 0
-        return code[real_start_pos: cur_pos+len(self.split_token)]
     
     def switch_inside(self, cur_code, code_split_pos, line_idx, cur_line):
         code_split_pos = copy.deepcopy(code_split_pos)
@@ -210,7 +212,7 @@ class AugPretrainCodedata(PretrainCodedata):
                 start_pos = -1
             else:
                 start_pos = code_split_pos[item-1]
-            select_line = self.select_line_according_to_split(cur_code, start_pos, end_pos)
+            select_line = select_line_according_to_split(self.split_token, cur_code, start_pos, end_pos)
             if select_line.strip() != cur_line.strip() and select_line.strip() != "":
                 return select_line
         return ""
@@ -237,7 +239,7 @@ class AugPretrainCodedata(PretrainCodedata):
                     start_pos = -1
                 else:
                     start_pos = other_code_split_pos[item-1]
-                select_line = self.select_line_according_to_split(cur_code, start_pos, end_pos)
+                select_line = select_line_according_to_split(self.split_token, cur_code, start_pos, end_pos)
                 if select_line.strip() != cur_line.strip() and select_line.strip() != "":
                     return select_line
         return ""
@@ -280,14 +282,20 @@ class AugExecCodeData(Dataset):
                  tokenizer,
                  split_token="\n",
                  additional_prompt="", 
-                 max_length=2048):
+                 max_length=2048,
+                 original_label=1,
+                 mutated_label=2):
         self.data_path = data_path
+        self.original_label = original_label
+        self.mutated_label = mutated_label
         self.raw_data = pd.read_csv(data_path, index_col=0)
         self.error_code = self.raw_data['sourceText']
         self.correct_code = self.raw_data["targetText"]
         self.sourceLineText = self.raw_data["sourceLineText"]
         self.targetLineText = self.raw_data["targetLineText"]
+        self.diffText_del = self.raw_data["diffText_del"]
         self.error_linenum = [i - 1 for i in self.raw_data['lineNums_Abs']] # From 1-based to 0-based
+        self.correct_linenum = [i - 1 for i in self.raw_data['lineNums_Abs']] # From 1-based to 0-based
         self.error_info = self.raw_data['sourceErrorClangParse']
         self.tokenizer = tokenizer
         self.split_token = split_token
@@ -314,17 +322,20 @@ class AugExecCodeData(Dataset):
         self.token_output = [value for i, value in enumerate(self.token_output) if i not in drop_list]
         self.sourceLineText = [value for i, value in enumerate(self.sourceLineText) if i not in drop_list]
         self.targetLineText = [value for i, value in enumerate(self.targetLineText) if i not in drop_list]
+        self.diffText_del = [value for i, value in enumerate(self.diffText_del) if i not in drop_list]
+        self.correct_linenum = [value for i, value in enumerate(self.correct_linenum) if i not in drop_list]
         self.raw_data = self.raw_data.drop(index=drop_list).reset_index(drop=True)
 
         self.error_split_pos = []
         self.correct_split_pos = []
+        self.labels = []
         drop_list = []
         for idx in range(len(self.error_code)):
             code = self.error_code[idx]
             processed_split_pos, remove_index = self._obtain_split_pos(code)
             self.error_split_pos.append(processed_split_pos)
             error_linenums = adjust_indices([self.error_linenum[idx]], remove_index)
-            if len(error_linenums) < 1:
+            if len(error_linenums) < 1 or len(processed_split_pos) <= error_linenums[0]:
                 drop_list.append(idx)
                 self.error_linenum[idx] = -1
             else:
@@ -332,6 +343,29 @@ class AugExecCodeData(Dataset):
             correct_code = self.correct_code[idx]
             processed_split_pos, remove_index = self._obtain_split_pos(correct_code)
             self.correct_split_pos.append(processed_split_pos)
+            correct_linenums = adjust_indices([self.correct_linenum[idx]], remove_index)
+            if len(correct_linenums) < 1 or len(processed_split_pos) <= correct_linenums[0]:
+                drop_list.append(idx)
+                self.correct_linenum[idx] = -1
+            else:
+                self.correct_linenum[idx] = correct_linenums[0]
+            
+            
+            if len(drop_list) > 0 and drop_list[-1] != idx:
+                end_pos = self.error_split_pos[idx][self.error_linenum[idx]]
+                prev_end_pos = self.error_split_pos[idx][self.error_linenum[idx]-1] if self.error_linenum[idx] > 0 else -1
+                error_code_line = select_line_according_to_split("\n", self.error_code[idx], prev_end_pos, end_pos)
+                end_pos = self.correct_split_pos[idx][self.correct_linenum[idx]]
+                prev_end_pos = self.correct_split_pos[idx][self.correct_linenum[idx]-1] if self.correct_linenum[idx] > 0 else -1
+                correct_code_line = select_line_according_to_split("\n", self.correct_code[idx], prev_end_pos, end_pos)
+                if error_code_line.strip() == correct_code_line.strip():
+                    drop_list.append(idx)
+            
+            
+            #if self.diffText_del[idx] is not np.nan:
+                #temp = utils.find_all_occurrences("\n", self.diffText_del[idx])
+            #    self.correct_linenum[idx] += 1
+            #self.correct_split_pos.append(processed_split_pos)
         
 
         self.error_code = [value for i, value in enumerate(self.error_code) if i not in drop_list]
@@ -344,6 +378,13 @@ class AugExecCodeData(Dataset):
         self.raw_data = self.raw_data.drop(index=drop_list).reset_index(drop=True)
         self.error_split_pos = [value for i, value in enumerate(self.error_split_pos) if i not in drop_list]
         self.correct_split_pos = [value for i, value in enumerate(self.correct_split_pos) if i not in drop_list]
+        self.diffText_del = [value for i, value in enumerate(self.diffText_del) if i not in drop_list]
+        self.correct_linenum = [value for i, value in enumerate(self.correct_linenum) if i not in drop_list]
+        for idx, item in enumerate(self.error_split_pos):
+            line_label = [self.original_label] * len(item)
+            temp_idx = self.error_linenum[idx]
+            line_label[temp_idx] = self.mutated_label
+            self.labels.append(line_label)
 
     
     def _obtain_split_pos(self, code):
@@ -372,8 +413,9 @@ class AugExecCodeData(Dataset):
             },
             "mutated_code": {
                 "code": self.error_code[idx],
-                "contrastive_pair": [[self.error_linenum[idx]], [self.error_linenum[idx]]],
+                "contrastive_pair": [[self.correct_linenum[idx]], [self.error_linenum[idx]]],
                 "code_split_pos": self.error_split_pos[idx],
+                "line_label": self.labels[idx],
             },
             "correct_code": self.correct_code[idx],
             "error_linenum": self.error_linenum[idx],
@@ -509,7 +551,9 @@ def inference_and_collect(
             
         
 # python3 method/collect_hidden_aug.py --config-file model_eval_config/CodeLlama_hidden_state.yaml --result-output-path /data/data_disk/trust_code/leetcode_aug3_fix
-app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
+# python3 method/collect_hidden_aug.py --config-file model_eval_config/CodeLlama_hidden_state_tracer.yaml --result-output-path /data/data_disk/trust_code/tracer
+#app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
+app = typer.Typer(pretty_exceptions_short=False)
 @app.command()
 def main(
     config_file: Annotated[Path, typer.Option()],
@@ -539,15 +583,23 @@ def main(
     # ===== Load Model =====
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
     recorder = extract_util.TransHookRecorder({hidden_layer: {"return_first": True}}, model, mode="plain")
-    
-    aug_times = len(mutation_prop)
-    data = AugPretrainCodedata(
-        float(mutation_prop[0]),
-        dataset_name,
-        feature_key_list,
-        preprocess_all_in_memory=True,
-        split_token=split_token
-    )
+
+    if "tracer" in dataset_name:
+        aug_times = 0
+        logger.info("Using AugExecCodeData for Tracer dataset")
+        data = AugExecCodeData(
+            data_path=dataset_name,
+            tokenizer=tokenizer,
+        )
+    else:
+        aug_times = len(mutation_prop)
+        data = AugPretrainCodedata(
+            float(mutation_prop[0]),
+            dataset_name,
+            feature_key_list,
+            preprocess_all_in_memory=True,
+            split_token=split_token
+        )
     #instance_real_num = data.compute_all_inference_num()
     #store = naive_store.NaiveTensorStore()
     store = naive_store.VariedKeyTensorStore()

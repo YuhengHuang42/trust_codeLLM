@@ -40,10 +40,10 @@ class TracerData():
         self.random_sample = random_sample
         if random_sample is not None:
             self.raw_data = self.raw_data.sample(random_sample) 
-        self.error_code = self.raw_data['sourceText'].to_numpy()
-        self.correct_code = self.raw_data["targetText"].to_numpy()
-        self.error_linenum = self.raw_data['lineNums_Abs'].to_numpy() - 1 # From 1-based to 0-based
-        self.error_info = self.raw_data['sourceErrorClangParse'].to_numpy()
+        self.error_code = self.raw_data['sourceText']
+        self.correct_code = self.raw_data["targetText"]
+        self.error_linenum = [max(i - 1, len(self.error_code[idx].splitlines()) - 1) for idx, i in enumerate(self.raw_data['lineNums_Abs'])] # From 1-based to 0-based
+        self.error_info = self.raw_data['sourceErrorClangParse']
         self.tokenizer = tokenizer
         self.token_output = []
         max_length = min(max_length, tokenizer.model_max_length)
