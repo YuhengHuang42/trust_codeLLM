@@ -30,6 +30,11 @@ from method.extract import extract_util
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 
+LAYER_DICT = {
+    "Phind/Phind-CodeLlama-34B-v2": {
+        -1: "model.layers.47.self_attn"
+    }
+}
 class TracerData():
     def __init__(self, 
                  data_path, 
@@ -94,7 +99,9 @@ class TracerData():
     def keys(self):
         return [i for i in range(len(self.error_code))]
     
-def get_attn_snapshot(model, tokenizer, data, cleaner=None):
+def get_attn_snapshot(model, tokenizer, data, layer, cleaner=None):
+    #assert layer == -1
+    recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
     result = dict()
     for key in tqdm.tqdm(data.keys()):
         #str_input = data[key]['str_all']
@@ -105,9 +112,13 @@ def get_attn_snapshot(model, tokenizer, data, cleaner=None):
                           "attention_mask": torch.tensor([1 for i in range(len(data[key]['token_output']))]).reshape(1, -1)
                           }
         with torch.inference_mode():
-            snapshot = model.forward(**tokenized_info, output_attentions=True)
-            attn_snapshot = [i.cpu() for i in snapshot['attentions']]
-        result[key] = attn_snapshot # [layer_num, num_heads, seq_len, seq_len]
+            past_key_values = extract_util.OffloadedCache() # GPU Memory Efficient
+            tokenized_info["past_key_values"] = past_key_values
+            _, record_dict = recorder.forward(tokenized_info)
+            attn_snapshot = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
+            #snapshot = model.forward(**tokenized_info, output_attentions=True)
+            #attn_snapshot = [i.cpu() for i in snapshot['attentions']] # [layer_num, num_heads, seq_len, seq_len]
+        result[key] = [attn_snapshot] # FIXME for layer != -1
     return result
 
 def get_hidden_snapshot(model, layer, data):
@@ -226,7 +237,7 @@ def main(
     
     training_data_path = os.path.join(training_data_folder, training_data_file_name.format(layer))
     if os.path.exists(training_data_path):
-        logger.info(f"Load {collect_type} training data from {training_data_path}")
+        #logger.info(f"Load {collect_type} training data from {training_data_path}")
         data_collection_flag = True
     else:
         logger.info(f"{collect_type} Training data not found at {training_data_path}")
@@ -236,33 +247,42 @@ def main(
     
     train_x = []
     snapshot_x = {}
+    store_y = {}
     train_y = []
     
     if data_collection_flag:
         training_data = torch.load(training_data_path)
+        logger.info(f"Load {collect_type} training data from {training_data_path}")
         snapshot_x = training_data["snapshot_x"]
-        train_y = training_data["train_y"]
-        for key in snapshot_x:
-            snap_shot_single = snapshot_x[key]
-            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
-            input_token_length = data[key]["input_length"]
-            if mode == "lbl":
-                al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-                train_x += [i for i in al_result]
-            elif mode == "sae":
-                latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
-                train_x += [i for i in latent_activations]
+        store_y = training_data["store_y"]
+        for idx, dataset_name in enumerate(dataset_list):
+            for key in snapshot_x[dataset_name]:
+                snap_shot_single = snapshot_x[dataset_name][key]
+                data = data_line_token_pair[0][idx]
+                candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
+                input_token_length = data[key]["input_length"]
+                if mode == "lbl":
+                    al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
+                    train_x += [i for i in al_result]
+                elif mode == "sae":
+                    latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
+                    train_x += [i for i in latent_activations]
+                train_y += store_y[dataset_name][key]
     else:
-        #cleaner = utils.ModelOutputCleaner(start_token, model_name)
-        if collect_type == "attention":
-            snap_shot = get_attn_snapshot(model, tokenizer, data, None)
-        elif collect_type == "hidden":
-            snap_shot = get_hidden_snapshot(model, layer, data)
-        label_dict = dict()
         for idx in range(len(data_line_token_pair[0])):
+            #cleaner = utils.ModelOutputCleaner(start_token, model_name)
             data = data_line_token_pair[0][idx]
             error_line_info = data_line_token_pair[1][idx]
             important_token_info = data_line_token_pair[2][idx]
+            data_class_name = dataset_list[idx]
+            snapshot_x[data_class_name] = dict()
+            store_y[data_class_name] = dict()
+            if collect_type == "attention":
+                layer_name = LAYER_DICT[model_name][layer]
+                snap_shot = get_attn_snapshot(model, tokenizer, data, layer_name, None)
+            elif collect_type == "hidden":
+                snap_shot = get_hidden_snapshot(model, layer, data)
+            label_dict = dict()
             for key in data.keys():
                 candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
                 if key in important_token_info:
@@ -271,7 +291,7 @@ def main(
                     labels = [0 for i in range(len(candidate_tokens))]
                 label_dict[key] = labels
                 snap_shot_single = snap_shot[key]
-                snapshot_x[key] = snap_shot_single
+                snapshot_x[data_class_name][key] = snap_shot_single
                 input_token_length = data[key]["input_length"]
                 if mode == "lbl":
                     al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
@@ -280,7 +300,8 @@ def main(
                     latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
                     train_x += [i for i in latent_activations]
                 train_y += label_dict[key]
-        torch.save({"snapshot_x": snapshot_x, "train_y": train_y}, training_data_path)
+                store_y[data_class_name][key] = label_dict[key]
+        torch.save({"snapshot_x": snapshot_x, "store_y": store_y}, training_data_path)
     
     #for key in data:
     #    input_token_length = data[key]["input_length"]
@@ -289,6 +310,7 @@ def main(
     #    train_x += [i for i in al_result]
     #    train_y += label_dict[key]
     train_x = np.stack(train_x)
+    logger.info(f"Train X shape: {train_x.shape}")
     
     if mode == "lbl":
         clf = LBLRegression()

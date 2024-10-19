@@ -4,6 +4,7 @@ from sklearn.neural_network import MLPClassifier
 import joblib
 from sklearn import svm
 import torch
+from sklearn.decomposition import TruncatedSVD
 
 from method.sae_model import Autoencoder
 
@@ -71,6 +72,12 @@ class EncoderClassifier():
             encoder, 
             ):
         self.fit_model_param = fit_model_param
+        self.dim_red = None
+        if "dimension_reduction" in self.fit_model_param:
+            dim_red_param = self.fit_model_param.pop("dimension_reduction")
+            if "svd" in dim_red_param:
+                self.dim_red = TruncatedSVD(**dim_red_param["svd"])
+                train_x = self.dim_red.fit_transform(train_x)
         self.model_type = model_type
         self.encoder = encoder
         if self.model_type.lower() == "logistic":
@@ -82,7 +89,8 @@ class EncoderClassifier():
         
     def save(self, path):
         encoder_device = self.encoder.device
-        joblib.dump({"model": self.clf, 
+        joblib.dump({"model": self.clf,
+                     "dim_red": self.dim_red, 
                      "param": self.fit_model_param, 
                      "model_type": self.model_type,
                      "device": encoder_device,
@@ -98,6 +106,7 @@ class EncoderClassifier():
         model.clf = loaded_info["model"]
         model.fit_model_param = loaded_info["param"]
         model.model_type = loaded_info["model_type"]
+        model.dim_red = loaded_info["dim_red"]
         device = loaded_info["device"]
         encoder = Autoencoder.from_state_dict(loaded_info["encoder"])
         model.encoder = encoder.to(device)
@@ -109,6 +118,8 @@ class EncoderClassifier():
     
     def predict(self, layer_info, input_token_length, candidate_tokens):
         latent = collect_hidden_states(layer_info, input_token_length, candidate_tokens, self.encoder).numpy()
+        if self.dim_red is not None:
+            latent = self.dim_red.transform(latent)
         y = self.clf.predict_proba(latent)
         return y
     

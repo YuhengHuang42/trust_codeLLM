@@ -153,6 +153,11 @@ def training_one_epoch_contrastive(sae,
                 total_loss = recon_loss
             else:
                 total_loss = recon_loss + contrastive_loss_fn(ori_latents[original_index], mut_latents[mutated_index])
+                final_pair = ori_latents[ori_div_list]
+                #energy = (final_pair**2).mean(dim=1, keepdim=True)  # Compute energy for each row (vector)
+                self_contrastive = final_pair / final_pair.norm(dim=-1, keepdim=True)
+                upper_triangular = torch.triu(torch.cdist(self_contrastive, self_contrastive), diagonal=1)
+                total_loss += upper_triangular[upper_triangular > 0].mean()
             total_loss.backward()
             if clip_grad:
                 pre_norm = compute_grad_norm(sae)

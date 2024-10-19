@@ -43,7 +43,7 @@ def compute_hit(important_tokens: list, selected_tokens: list):
     selected = set(selected_tokens)
     return len(selected.intersection(gt)) / len(gt) 
 
-def evaluate_lbl(data, 
+def evaluate_binding(data, 
                  key_list, 
                  important_token_info, 
                  recorder, 
@@ -188,7 +188,7 @@ def main(
         detection_model = detect_model.EncoderClassifier.load(detection_model_path)
     #lbl_model.load(lbl_model_path)
     
-    score, counter, first_result, oom_keys = evaluate_lbl(data, 
+    score, counter, first_result, oom_keys = evaluate_binding(data, 
                                                         evaluate_key_list, 
                                                         important_token_info, 
                                                         recorder, 
@@ -213,7 +213,7 @@ def main(
             recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
         elif collect_type == "hidden":
             recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
-        score, counter, second_result, oom_keys = evaluate_lbl(data, 
+        score, counter, second_result, oom_keys = evaluate_binding(data, 
                                                             oom_keys, 
                                                             important_token_info, 
                                                             recorder, 
