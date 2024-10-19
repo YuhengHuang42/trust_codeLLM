@@ -53,10 +53,14 @@ def collect_hidden_states(hidden_map, input_token_length, output_seg, encoder):
         line_split_token = max(real_seg)
         hidden_seg = hidden_map[line_split_token] # (token_num, hidden_size)
         hidden_all.append(hidden_seg)
-    hidden_all = torch.stack(hidden_all).to(encoder.device)
-    with torch.inference_mode():
-        latent_activations, info = encoder.encode(hidden_all)
-    return latent_activations.cpu()
+    hidden_all = torch.stack(hidden_all)
+    if encoder is not None:
+        with torch.inference_mode():
+            hidden_all = hidden_all.to(encoder.device)
+            latent_activations, info = encoder.encode(hidden_all)
+        return latent_activations.cpu()
+    else:
+        return hidden_all
     
             
 class EncoderClassifier():

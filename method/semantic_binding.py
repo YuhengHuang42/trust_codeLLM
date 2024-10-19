@@ -288,10 +288,13 @@ def main(
                 candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
                 input_token_length = data[key]["input_length"]
                 if mode == "lbl":
-                    al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-                    train_x += [i for i in al_result]
+                    #al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
+                    train_x += [i for i in snap_shot_single]
                 elif mode == "sae":
-                    latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
+                    #latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
+                    with torch.inference_mode():
+                        snap_shot_single = torch.from_numpy(snap_shot_single)
+                        latent_activations, info = encoder.encode(snap_shot_single.to(encoder.device))
                     train_x += [i for i in latent_activations]
                 train_y += store_y[dataset_name][key]
     else:
@@ -330,13 +333,17 @@ def main(
                     labels = [0 for i in range(len(candidate_tokens))]
                 label_dict[key] = labels
                 snap_shot_single = snap_shot[key]
-                snapshot_x[data_class_name][key] = snap_shot_single
+                #snapshot_x[data_class_name][key] = snap_shot_single
                 input_token_length = data[key]["input_length"]
                 if mode == "lbl":
                     al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
+                    snapshot_x[data_class_name][key] = al_result
                     train_x += [i for i in al_result]
                 elif mode == "sae":
-                    latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
+                    before_latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, None)
+                    with torch.inference_mode():
+                        latent_activations, info = encoder.encode(before_latent_activations.to(encoder.device))
+                    snapshot_x[data_class_name][key] = before_latent_activations.cpu().numpy()
                     train_x += [i for i in latent_activations]
                 train_y += label_dict[key]
                 store_y[data_class_name][key] = label_dict[key]
