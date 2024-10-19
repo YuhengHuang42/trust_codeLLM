@@ -5,6 +5,7 @@ import joblib
 from sklearn import svm
 import torch
 from sklearn.decomposition import TruncatedSVD
+from imblearn.over_sampling import SMOTE
 
 from method.sae_model import Autoencoder
 
@@ -78,6 +79,11 @@ class EncoderClassifier():
             if "svd" in dim_red_param:
                 self.dim_red = TruncatedSVD(**dim_red_param["svd"])
                 train_x = self.dim_red.fit_transform(train_x)
+        if "balanced" in self.fit_model_param:
+            balanced = self.fit_model_param.pop("balanced")
+            if balanced:
+                smote = SMOTE()
+                train_x, train_y = smote.fit_resample(train_x, train_y)
         self.model_type = model_type
         self.encoder = encoder
         if self.model_type.lower() == "logistic":
@@ -149,6 +155,8 @@ class LBLRegression():
             self.clf = LogisticRegression(**fit_model_param).fit(train_x, train_y)
         elif self.model_type.lower() == "svm":
             self.clf = svm.SVC(probability=True, **fit_model_param).fit(train_x, train_y)
+        elif self.model_type.lower() == "mlp":
+            self.clf = MLPClassifier(**fit_model_param).fit(train_x, train_y)
         
     def save(self, path):
         joblib.dump({"model": self.clf, "param": self.fit_model_param, "attn_layer": self.attn_layer, "model_type": self.model_type}, path)

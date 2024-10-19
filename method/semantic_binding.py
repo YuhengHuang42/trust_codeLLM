@@ -281,6 +281,8 @@ def main(
         store_y = training_data["store_y"]
         for idx, dataset_name in enumerate(dataset_list):
             for key in snapshot_x[dataset_name]:
+                if key not in data:
+                    continue
                 snap_shot_single = snapshot_x[dataset_name][key]
                 data = data_line_token_pair[0][idx]
                 candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
@@ -348,6 +350,7 @@ def main(
     #    train_y += label_dict[key]
     train_x = np.stack(train_x)
     logger.info(f"Train X shape: {train_x.shape}")
+    logger.info(f"Train Y Pos Label: {sum(train_y)}")
     
     if mode == "lbl":
         clf = LBLRegression()
