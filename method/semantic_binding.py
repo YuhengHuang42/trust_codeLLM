@@ -150,7 +150,8 @@ def get_hidden_snapshot(model, layer, data):
     return result
             
 def clean_data(shelve_data):
-    for key in shelve_data.keys():
+    all_keys = list(shelve_data.keys())
+    for key in all_keys:
         if len(shelve_data[key]['gen_probs'][0]) <= 1:
             shelve_data.pop(key)
         if shelve_data[key]['input_length'] >= HARD_TOKEN_LIMIT:
