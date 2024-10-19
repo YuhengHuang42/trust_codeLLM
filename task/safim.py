@@ -18,6 +18,7 @@ RUNTIME_FAILED = "runtime_failed"
 COMPILE_FAILED = "compile_failed"
 INFINTIE_LOOP = "infinite_loop"
 TEST_FAILED = "test_failed"
+TIME_OUT = "time_out"
 
 _SUCCESS = 0
 _RUNTIME_FAILED = 1
@@ -32,7 +33,57 @@ COMPLETION_PLACEHOLDER = {
     "csharp": "/* TODO: Your code here */",
 }
 
-_mapping = {_SUCCESS: SUCCESS, _RUNTIME_FAILED: RUNTIME_FAILED, _COMPILE_FAILED: COMPILE_FAILED, _INFINTIE_LOOP: INFINTIE_LOOP, _TEST_FAILED: TEST_FAILED, _UNKNOWN: None}
+TIMEOUT_TIME = 20
+
+_mapping = {_SUCCESS: SUCCESS, _RUNTIME_FAILED: RUNTIME_FAILED, _COMPILE_FAILED: COMPILE_FAILED, _INFINTIE_LOOP: INFINTIE_LOOP, _TEST_FAILED: TEST_FAILED, _UNKNOWN: TIME_OUT}
+
+import difflib
+
+def clean_code_by_suffix(code: str, suffix: str) -> str:
+    """
+    Remove redundant lines from the end of the code indicated by suffix.
+    Support partial matching.
+    """
+    code_lines = code.splitlines()
+    suffix_lines = suffix.splitlines()
+    
+    normalized_shift = 0
+    for idx, line in enumerate(code_lines):
+        if len(line) == 0:
+            continue
+        else:
+            normalized_shift = idx
+            break
+    normalized_code_lines = code_lines[normalized_shift:]
+
+    for idx, line in enumerate(suffix_lines):
+        if len(line) == 0:
+            continue
+        else:
+            suffix_lines = suffix_lines[idx:]
+            break
+
+    # Use SequenceMatcher to find the matching blocks
+    s = difflib.SequenceMatcher(None, normalized_code_lines, suffix_lines)
+    matches = s.get_matching_blocks()
+
+    # Find the longest match at the end of code_lines and start of suffix_lines
+    max_match_size = 0
+    #return (matches)
+    for match in matches:
+        if match.a + match.size == len(normalized_code_lines) and match.b == 0:
+            max_match_size = match.size
+            break
+
+    # Remove the matched lines from the code
+    if max_match_size > 0:
+        cleaned_code_lines = code_lines[:-max_match_size]
+    else:
+        cleaned_code_lines = code_lines
+
+    cleaned_code = '\n'.join(cleaned_code_lines)
+    #raise Exception
+    return cleaned_code, [i for i in range(len(cleaned_code_lines))]
 
 class SAFIMDataset(CodeDataset):
     def __init__(self, task="block_v2", language="python"):
@@ -96,14 +147,13 @@ class SAFIMDataset(CodeDataset):
         return prompt
     
     def postprocess(self, output: str, problem_id: int):
-        generate_code = truncate_line_until_block(self.problems[problem_id], output)
+        generated_code = truncate_line_until_block(self.problems[problem_id], output)
+        eval_prefix, eval_suffix = self.problems[problem_id]['eval_prompt'].split("{{completion}}")
+        generated_code, line_number = clean_code_by_suffix(generated_code, eval_suffix)
         #full_code = self.problems[problem_id]['eval_prompt'].replace("{{completion}}", generate_code)
-        return generate_code
+        return generated_code
         
     
-    
-    
-        
 
 def get_parser(lang):
     assert lang.lower() == "python"
@@ -267,7 +317,7 @@ def exec_sample(code, problem_id, test_cases, stat: Value, output_error_case: bo
             p = Popen(f"python3 temp_dir/{problem_id}/{problem_id}.py", stdin=PIPE, stdout=PIPE, stderr=PIPE, shell=True)
             
             try:
-                stdout, stderr_data = p.communicate(input=f_in.encode(), timeout=100)
+                stdout, stderr_data = p.communicate(input=f_in.encode(), timeout=TIMEOUT_TIME)
             except subprocess.TimeoutExpired:
                 stat.value = _INFINTIE_LOOP
                 break
@@ -337,7 +387,7 @@ def untrusted_check(
     )
 
     p.start()
-    p.join(100)
+    p.join(TIMEOUT_TIME)
 
     if p.is_alive():
         p.terminate()

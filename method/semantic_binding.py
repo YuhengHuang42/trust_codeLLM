@@ -4,6 +4,7 @@ import torch
 import os
 import typer
 from typing_extensions import Annotated
+from typing import List
 from pathlib import Path
 import json
 import yaml
@@ -23,6 +24,7 @@ sys.path.append(str(project_root))
 import utility.utils as utils
 import method.sae_model as sae_model
 from task import dataset_utils
+from task import safim
 from method.detect_model import LBLRegression, EncoderClassifier, collect_attention_map, collect_hidden_states
 from method.extract import extract_util
 
@@ -123,14 +125,38 @@ def get_hidden_snapshot(model, layer, data):
         result[key] = hidden_states
     return result
             
+def clean_data(shelve_data):
+    for key in shelve_data.keys():
+        if len(shelve_data[key]['gen_probs'][0]) <= 1:
+            shelve_data.pop(key)
+    return shelve_data
 
+def get_error_line_info_from_completion(shelve_data, upper_bound_abs_num=5):
+    error_line_info = dict()
+    pop_key = []
+    dataset = safim.SAFIMDataset()
+    for key in shelve_data:
+        if shelve_data[key]['code_correctness'] != "success":
+            # We assume the first line is the error line in code completion dataset.
+            gt = dataset[int(key)]['ground_truth']
+            gt_lines = len(gt.splitlines())
+            if len(shelve_data[key]['line_number']) == 0:
+                pop_key.append(key)
+                continue
+            labelled_line_num = shelve_data[key]['line_number'][0]
+            if gt_lines + upper_bound_abs_num < len(labelled_line_num):
+                pop_key.append(key)
+                continue
+            error_line_info[key] = [labelled_line_num]
+    return error_line_info, pop_key
+    
 '''
 
 '''
 @app.command()
 def main(
-    important_label_path: Annotated[Path, typer.Option()],
-    data_path: Annotated[Path, typer.Option()],
+    #important_label_path: Annotated[List[str], typer.Option()],
+    #data_path: Annotated[Path, typer.Option()],
     config_file: Annotated[Path, typer.Option()],
     model_save_path: Annotated[Path, typer.Option()],
     training_data_folder: Annotated[Path, typer.Option()] = None,
@@ -155,31 +181,48 @@ def main(
         encoder_path = config_dict['task_config'].get("encoder_path", None)
     collect_type = config_dict["task_config"]['collect_type']
     mode = config_dict["task_config"]['mode']
-    data_source = config_dict["task_config"].get("data_source", "shelve")
     random_sample = config_dict["task_config"].get("random_sample", None)
     additional_prompt = config_dict["task_config"].get("additional_prompt", "")
-    assert data_source in ["shelve", "tracer"]
+    dataset_list = config_dict["task_config"].get("dataset_list", ["humaneval"])
+    data_source = config_dict["task_config"].get("data_source", ["shelve"])
+    important_label_path_list = config_dict["task_config"].get("important_label_path_list", [None])
+    data_path_list = config_dict["task_config"]['data_path_list']
+    #assert data_source in ["shelve", "tracer"]
     assert collect_type in ["attention", "hidden"]
     assert mode in ["lbl", "sae"]
+    #assert dataset in ["humaneval", "safim"]
     if mode == "sae":
         assert encoder_path is not None
         encoder_param = torch.load(encoder_path)
         encoder = sae_model.Autoencoder.from_state_dict(encoder_param["model_state_dict"])
     
     tokenizer = utils.load_tokenizer(model_name)
-    if data_source == "shelve":
-        data = utils.load_shelve(data_path)
-        with open(important_label_path, "r") as ifile:
-            error_line_info = json.load(ifile)
-    elif data_source == "tracer":
-        data = TracerData(data_path, tokenizer, random_sample=random_sample, additional_prompt=additional_prompt)
-        error_line_info = data.get_important_line_info()
+    data_line_token_pair = [[], [], []]
+    for idx, source in enumerate(data_source):
+        important_label_path = important_label_path_list[idx]
+        data_path = data_path_list[idx]
+        dataset = dataset_list[idx]
+        if source == "shelve":
+            data = utils.load_shelve(data_path)
+            data = clean_data(data)
+            if dataset == "safim":
+                error_line_info, pop_key = get_error_line_info_from_completion(data)
+                for key in pop_key:
+                    data.pop(key)
+            else:
+                with open(important_label_path, "r") as ifile:
+                    error_line_info = json.load(ifile)
+        elif source == "tracer":
+            data = TracerData(data_path, tokenizer, random_sample=random_sample, additional_prompt=additional_prompt)
+            error_line_info = data.get_important_line_info()
+        data_line_token_pair[0].append(data)
+        data_line_token_pair[1].append(error_line_info)
+        target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
+        data_line_token_pair[2].append(important_token_info)
         
     ## Load model
     quantization = config_dict["llm_config"]["quantization"]
     #generate_config = config_dict["llm_config"]["generate_config"]
-
-    target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
     
     training_data_path = os.path.join(training_data_folder, training_data_file_name.format(layer))
     if os.path.exists(training_data_path):
@@ -216,23 +259,27 @@ def main(
         elif collect_type == "hidden":
             snap_shot = get_hidden_snapshot(model, layer, data)
         label_dict = dict()
-        for key in data.keys():
-            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
-            if key in important_token_info:
-                labels = utils.label_seg(important_token_info[key], candidate_tokens)
-            else:
-                labels = [0 for i in range(len(candidate_tokens))]
-            label_dict[key] = labels
-            snap_shot_single = snap_shot[key]
-            snapshot_x[key] = snap_shot_single
-            input_token_length = data[key]["input_length"]
-            if mode == "lbl":
-                al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-                train_x += [i for i in al_result]
-            elif mode == "sae":
-                latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
-                train_x += [i for i in latent_activations]
-            train_y += label_dict[key]
+        for idx in range(len(data_line_token_pair[0])):
+            data = data_line_token_pair[0][idx]
+            error_line_info = data_line_token_pair[1][idx]
+            important_token_info = data_line_token_pair[2][idx]
+            for key in data.keys():
+                candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
+                if key in important_token_info:
+                    labels = utils.label_seg(important_token_info[key], candidate_tokens)
+                else:
+                    labels = [0 for i in range(len(candidate_tokens))]
+                label_dict[key] = labels
+                snap_shot_single = snap_shot[key]
+                snapshot_x[key] = snap_shot_single
+                input_token_length = data[key]["input_length"]
+                if mode == "lbl":
+                    al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
+                    train_x += [i for i in al_result]
+                elif mode == "sae":
+                    latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
+                    train_x += [i for i in latent_activations]
+                train_y += label_dict[key]
         torch.save({"snapshot_x": snapshot_x, "train_y": train_y}, training_data_path)
     
     #for key in data:
