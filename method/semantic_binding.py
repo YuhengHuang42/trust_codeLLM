@@ -37,6 +37,8 @@ LAYER_DICT = {
         -1: "model.layers.47.self_attn"
     }
 }
+HARD_TOKEN_LIMIT = 4096 - 512
+
 class TracerData():
     def __init__(self, 
                  data_path, 
@@ -150,6 +152,8 @@ def get_hidden_snapshot(model, layer, data):
 def clean_data(shelve_data):
     for key in shelve_data.keys():
         if len(shelve_data[key]['gen_probs'][0]) <= 1:
+            shelve_data.pop(key)
+        if shelve_data[key]['input_length'] >= HARD_TOKEN_LIMIT:
             shelve_data.pop(key)
     return shelve_data
 
@@ -302,7 +306,6 @@ def main(
                 snap_shot_second = dict()
                 if len(oom_keys) > 0:
                     logger.info("Begin fallback inference for OOM data points")
-                    del recorder
                     del model
                     time.sleep(3)
                     gc.collect()

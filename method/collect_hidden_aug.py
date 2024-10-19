@@ -311,7 +311,7 @@ class AugExecCodeData(Dataset):
         for idx in range(len(self.error_code)):
             input_str = additional_prompt + self.error_code[idx]
             input_ids = tokenizer(input_str, return_tensors="pt", truncation=True, max_length=max_length)['input_ids']
-            if len(input_ids) >= max_length:
+            if inputs["input_ids"].shape[-1] >= max_length:
                 drop_list.append(idx)
             self.token_output.append(input_ids)
         
