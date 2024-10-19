@@ -12,6 +12,8 @@ from loguru import logger
 import tqdm
 import numpy as np
 import pandas as pd
+import time
+import gc
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
@@ -99,11 +101,14 @@ class TracerData():
     def keys(self):
         return [i for i in range(len(self.error_code))]
     
-def get_attn_snapshot(model, tokenizer, data, layer, cleaner=None):
+def get_attn_snapshot(model, tokenizer, data, layer, cleaner=None, keys=None):
     #assert layer == -1
     recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
     result = dict()
-    for key in tqdm.tqdm(data.keys()):
+    oom_keys = list()
+    if keys is None:
+        keys = data.keys()
+    for key in tqdm.tqdm(keys):
         #str_input = data[key]['str_all']
         #if cleaner is not None:
         #    str_input = cleaner.forward(str_input)
@@ -112,14 +117,20 @@ def get_attn_snapshot(model, tokenizer, data, layer, cleaner=None):
                           "attention_mask": torch.tensor([1 for i in range(len(data[key]['token_output']))]).reshape(1, -1)
                           }
         with torch.inference_mode():
-            past_key_values = extract_util.OffloadedCache() # GPU Memory Efficient
-            tokenized_info["past_key_values"] = past_key_values
-            _, record_dict = recorder.forward(tokenized_info)
-            attn_snapshot = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
-            #snapshot = model.forward(**tokenized_info, output_attentions=True)
-            #attn_snapshot = [i.cpu() for i in snapshot['attentions']] # [layer_num, num_heads, seq_len, seq_len]
+            try:
+                past_key_values = extract_util.OffloadedCache() # GPU Memory Efficient
+                tokenized_info["past_key_values"] = past_key_values
+                _, record_dict = recorder.forward(tokenized_info)
+                attn_snapshot = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
+                #snapshot = model.forward(**tokenized_info, output_attentions=True)
+                #attn_snapshot = [i.cpu() for i in snapshot['attentions']] # [layer_num, num_heads, seq_len, seq_len]
+            except torch.cuda.OutOfMemoryError as e:
+                oom_keys.append(key)
+                torch.cuda.empty_cache()
+                logger.info(f"Out of Memory error occurred for key: {key}. Moving to next.")
+                continue
         result[key] = [attn_snapshot] # FIXME for layer != -1
-    return result
+    return result, oom_keys
 
 def get_hidden_snapshot(model, layer, data):
     recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain")
@@ -174,6 +185,11 @@ def main(
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
     encoder_path: Annotated[Path, typer.Option()] = None
 ):
+    FALLBACK_ARGS = {
+        "quantization": "4bit",
+        "user_args": {"attn_implementation":"eager"},
+        "device_map": "balanced"
+    }
     with open(config_file, 'r') as file:
         config_dict = yaml.safe_load(file)
     cache_dir = None
@@ -183,7 +199,6 @@ def main(
         cache_dir = config_dict["system_setting"]["cache_dir"]
     else:
         cache_dir = None
-    
     model_name = config_dict["llm_config"]["model_name"]
     layer = config_dict["task_config"]["layer"]
     training_data_file_name = config_dict["task_config"]["training_data_file_name"]
@@ -202,11 +217,15 @@ def main(
     assert collect_type in ["attention", "hidden"]
     assert mode in ["lbl", "sae"]
     #assert dataset in ["humaneval", "safim"]
+    FALLBACK_ARGS["model_name"] = model_name
+    FALLBACK_ARGS["parallel"] = parallel
+    FALLBACK_ARGS["cache_dir"] = cache_dir
+    
     if mode == "sae":
         assert encoder_path is not None
         encoder_param = torch.load(encoder_path)
         encoder = sae_model.Autoencoder.from_state_dict(encoder_param["model_state_dict"])
-    
+
     tokenizer = utils.load_tokenizer(model_name)
     data_line_token_pair = [[], [], []]
     for idx, source in enumerate(data_source):
@@ -279,7 +298,21 @@ def main(
             store_y[data_class_name] = dict()
             if collect_type == "attention":
                 layer_name = LAYER_DICT[model_name][layer]
-                snap_shot = get_attn_snapshot(model, tokenizer, data, layer_name, None)
+                snap_shot_first, oom_keys = get_attn_snapshot(model, tokenizer, data, layer_name, None)
+                snap_shot_second = dict()
+                if len(oom_keys) > 0:
+                    logger.info("Begin fallback inference for OOM data points")
+                    del recorder
+                    del model
+                    time.sleep(3)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    model, tokenizer = utils.load_opensource_model(**FALLBACK_ARGS)
+                    snap_shot_second, oom_keys = get_attn_snapshot(model, tokenizer, data, layer_name, None, keys=oom_keys)
+                    if len(oom_keys) > 0:
+                        logger.error("OOM error still exists after fallback inference. Ignore them.")
+                        logger.error("OOM keys: {}".format(oom_keys))
+                snap_shot = {**snap_shot_first, **snap_shot_second}
             elif collect_type == "hidden":
                 snap_shot = get_hidden_snapshot(model, layer, data)
             label_dict = dict()
