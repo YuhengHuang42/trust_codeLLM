@@ -58,6 +58,7 @@ def evaluate_binding(data,
                  extract_code=True):
     oom_keys = []
     result = dict()
+    pred_profiler = list()
     for key in tqdm.tqdm(key_list):
         if extract_code:
             code_blocks_info = None
@@ -74,6 +75,7 @@ def evaluate_binding(data,
         tokenized_info = {"input_ids": torch.tensor(data[key]['token_output']).reshape(1, -1)[:, tail_truncate:], 
                         "attention_mask": torch.tensor([1 for i in range(len(data[key]['token_output']))]).reshape(1, -1)
                         }
+        #pred_profiler.append(copy.deepcopy(tokenized_info))
         with torch.inference_mode():
             # If transformer.__version__ == v4.45.1, directly import it from transformers.cache_utils 
             past_key_values = extract_util.OffloadedCache() # GPU Memory Efficient
@@ -81,7 +83,7 @@ def evaluate_binding(data,
             try:
                 #snapshot = model.forward(**tokenized_info, output_attentions=True)
                 #snapshot, hook_info = recorder.forward(tokenized_info)
-                pred_result = detection_model.predict_using_recorder(recorder, tokenized_info, input_token_length, candidate_tokens)
+                pred_result, pred_input = detection_model.predict_using_recorder(recorder, tokenized_info, input_token_length, candidate_tokens)
             except torch.cuda.OutOfMemoryError as e:
                 oom_keys.append(key)
                 torch.cuda.empty_cache()
@@ -91,6 +93,7 @@ def evaluate_binding(data,
         #del snapshot
         # Inference process of LBL baseline method
         #pred_result = detection_model.predict([attn_snapshot], input_token_length, candidate_tokens)
+        pred_profiler.append(pred_input)
         pred_result = pred_result[:, 1]
         result[key] = pred_result
         rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk]
@@ -101,6 +104,8 @@ def evaluate_binding(data,
         topk_score = compute_hit(important_token_info[key], selected_token)
         score += topk_score
         counter += 1
+        
+    #torch.save(pred_profiler, "pred_label_recoreder.pt")
     return score, counter, result, oom_keys
     
 @app.command()
@@ -198,7 +203,7 @@ def main(
                                                         layer,
                                                         max_profile_token_length=max_profile_token_length,
                                                         extract_code=extract_code
-                                                        )
+                                                    )
     
     second_result = dict()
     if len(oom_keys) > 0:

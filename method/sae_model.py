@@ -23,8 +23,14 @@ class Autoencoder(nn.Module):
     """
 
     def __init__(
-        self, n_latents: int, n_inputs: int, activation: Callable = nn.ReLU(), tied: bool = False,
-        normalize: bool = False
+        self, 
+        n_latents: int, 
+        n_inputs: int,
+        activation: Callable = nn.ReLU(), 
+        tied: bool = False,
+        normalize: bool = False,
+        project_dim: int = None,
+        dataset_level_norm: bool = False
     ) -> None:
         """
         :param n_latents: dimension of the autoencoder latent
@@ -35,6 +41,9 @@ class Autoencoder(nn.Module):
         super().__init__()
 
         self.pre_bias = nn.Parameter(torch.zeros(n_inputs))
+        self.project_dim = project_dim
+        if self.project_dim is not None:
+            self.projection: nn.Module = nn.Linear(n_inputs, project_dim)
         
         self.encoder: nn.Module = nn.Linear(n_inputs, n_latents, bias=False)
         #nn.init.kaiming_uniform_(self.encoder.weight)
@@ -46,6 +55,9 @@ class Autoencoder(nn.Module):
         else:
             self.decoder = nn.Linear(n_latents, n_inputs, bias=False)
         self.normalize = normalize
+        self.dataset_level_norm = dataset_level_norm
+        self.register_buffer('data_mean', torch.zeros(n_inputs, dtype=torch.float))
+        self.register_buffer('data_mean_counter', torch.tensor(0, dtype=torch.long))
 
         self.stats_last_nonzero: torch.Tensor
         self.latents_activation_frequency: torch.Tensor
@@ -80,6 +92,7 @@ class Autoencoder(nn.Module):
         :param x: input data (shape: [batch, n_inputs])
         :return: autoencoder latents (shape: [batch, n_latents])
         """
+        x = x.float()
         x, info = self.preprocess(x)
         return self.activation(self.encode_pre_act(x)), info
 
@@ -101,6 +114,9 @@ class Autoencoder(nn.Module):
                   autoencoder latents (shape: [batch, n_latents])
                   reconstructed data (shape: [batch, n_inputs])
         """
+        x = x.float()
+        if self.dataset_level_norm is True:
+            x = x - (self.data_mean)
         x, info = self.preprocess(x)
         latents_pre_act = self.encode_pre_act(x)
         latents = self.activation(latents_pre_act)
@@ -111,6 +127,25 @@ class Autoencoder(nn.Module):
         self.stats_last_nonzero += 1
 
         return latents_pre_act, latents, recons
+    
+    def projection_forward(self, latens: torch.Tensor) -> torch.Tensor:
+        return self.projection(latens)
+    
+    def update_data_mean(self, x: torch.Tensor):
+        assert len(x.shape) == 2
+        x = x.to(self.device)
+        
+        batch_size = x.shape[0]
+        batch_mean = x.mean(dim=0)
+
+        delta = batch_mean - self.data_mean
+        total_n = self.data_mean_counter + batch_size
+
+        # Update mean
+        self.data_mean += delta * batch_size / total_n
+
+        # Update count
+        self.data_mean_counter = total_n
 
     @classmethod
     def from_state_dict(

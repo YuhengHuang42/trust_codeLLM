@@ -153,11 +153,10 @@ def training_one_epoch_contrastive(sae,
                 total_loss = recon_loss
             else:
                 total_loss = recon_loss + contrastive_loss_fn(ori_latents[original_index], mut_latents[mutated_index])
-                final_pair = ori_latents[ori_div_list]
-                #energy = (final_pair**2).mean(dim=1, keepdim=True)  # Compute energy for each row (vector)
-                self_contrastive = final_pair / final_pair.norm(dim=-1, keepdim=True)
-                upper_triangular = torch.triu(torch.cdist(self_contrastive, self_contrastive), diagonal=1)
-                total_loss += upper_triangular[upper_triangular > 0].mean()
+                #final_pair = ori_latents[ori_div_list]
+                #self_contrastive = final_pair / final_pair.norm(dim=-1, keepdim=True)
+                #upper_triangular = torch.triu(torch.cdist(self_contrastive, self_contrastive), diagonal=1)
+                #total_loss += upper_triangular[upper_triangular > 0].mean()
             total_loss.backward()
             if clip_grad:
                 pre_norm = compute_grad_norm(sae)
@@ -229,6 +228,16 @@ def evaluate_contrastive(sae, data_loader_list, loss_fn):
                 loss_list.append(cur_loss)
     return np.average(loss_list)
 
+def obtain_dataset_mean(sae, data_loader_list):
+    for data_loader in data_loader_list:
+        for idx, store_batch in (enumerate(data_loader)):
+            original, mutated, original_index, mutated_index, ori_div_list = store_batch
+            with torch.inference_mode():
+                batch_x = store_batch[0]
+                sae.update_data_mean(original)
+                sae.update_data_mean(mutated)
+    return sae
+            
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 
 # python sae_training.py --config-file model_eval_config/CodeLlama_autoencoder.yaml --result-output-path /data/huangyuheng/trust_code/codellama34b/sae/contrastive_model
@@ -260,6 +269,7 @@ def main(
     num_workers = config_dict["task_config"].get("num_workers", 4)
     prefetch_factor = config_dict["task_config"].get("prefetch_factor", 2)
     store_type = config_dict["task_config"].get("store_type", "naive")
+    dataset_level_norm = config_dict["task_config"].get("dataset_level_norm", False)
     assert store_type in ["naive", "varied"]
     contrastive = config_dict["task_config"].get("contrastive", False)
     cold_start_epoch = config_dict["task_config"].get("cold_start_epoch", 1)
@@ -281,7 +291,8 @@ def main(
         hidden_neuron,
         activation=TopK(topk),
         normalize=normalize,
-        tied=tied
+        tied=tied,
+        dataset_level_norm=dataset_level_norm,
     )
     sae = sae.to(device)
     
@@ -296,13 +307,16 @@ def main(
         #store = VariedKeyTensorStore.load_from_disk(storage_path, open_mode="r")
         
     logger.info("Storage Ready")
-    #optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, sae.parameters()), lr=learning_rate,  eps=eps)
-    optimizer = torch.optim.AdamW(sae.parameters(), lr=learning_rate,  eps=eps)
     #data_loader =  DataLoader(store, batch_size=batch_size, collate_fn=get_collate_fn(feature_name), shuffle=True)
     data_loader_list = []
     for store in store_list:
         data_loader_list.append(store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor))
     #data_loader = store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor)
+    if dataset_level_norm:
+        logger.info("Enable dataset level normalization")
+        sae = obtain_dataset_mean(sae, data_loader_list)
+    #optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, sae.parameters()), lr=learning_rate,  eps=eps)
+    optimizer = torch.optim.AdamW(sae.parameters(), lr=learning_rate,  eps=eps)
     if scheduler_type == "cos":
         training_step = sum([len(i) for i in data_loader_list]) * epoch_num
         warmup_step = math.floor(training_step * 0.1) # Hard-code. TODO: Improve this. 

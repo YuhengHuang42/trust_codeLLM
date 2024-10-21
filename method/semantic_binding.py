@@ -27,7 +27,7 @@ import utility.utils as utils
 import method.sae_model as sae_model
 from task import dataset_utils
 from task import safim
-from method.detect_model import LBLRegression, EncoderClassifier, collect_attention_map, collect_hidden_states
+from method.detect_model import LBLRegression, EncoderClassifier, collect_attention_map, collect_hidden_states, flat_data_dict
 from method.extract import extract_util
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
@@ -218,9 +218,11 @@ def main(
     data_source = config_dict["task_config"].get("data_source", ["shelve"])
     important_label_path_list = config_dict["task_config"].get("important_label_path_list", [None])
     data_path_list = config_dict["task_config"]['data_path_list']
+    model_type = config_dict["task_config"].get("model_type", "mlp")
+    logger.info(f"Using Model Type: {model_type}")
     #assert data_source in ["shelve", "tracer"]
     assert collect_type in ["attention", "hidden"]
-    assert mode in ["lbl", "sae"]
+    assert mode in ["lbl", "sae", "internal_only"]
     #assert dataset in ["humaneval", "safim"]
     FALLBACK_ARGS["model_name"] = model_name
     FALLBACK_ARGS["parallel"] = parallel
@@ -230,6 +232,8 @@ def main(
         assert encoder_path is not None
         encoder_param = torch.load(encoder_path)
         encoder = sae_model.Autoencoder.from_state_dict(encoder_param["model_state_dict"])
+    else:
+        encoder = None
 
     tokenizer = utils.load_tokenizer(model_name)
     data_line_token_pair = [[], [], []]
@@ -279,6 +283,9 @@ def main(
         logger.info(f"Load {collect_type} training data from {training_data_path}")
         snapshot_x = training_data["snapshot_x"]
         store_y = training_data["store_y"]
+        if model_type.lower() == "lstm":
+            train_x = {key: {} for key in dataset_list}
+            train_y = {key: {} for key in dataset_list}
         for idx, dataset_name in enumerate(dataset_list):
             for key in snapshot_x[dataset_name]:
                 if key not in data:
@@ -289,15 +296,30 @@ def main(
                 input_token_length = data[key]["input_length"]
                 if mode == "lbl":
                     #al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-                    train_x += [i for i in snap_shot_single]
-                elif mode == "sae":
+                    if model_type.lower() == "lstm":
+                        train_x[dataset_name][key] = torch.stack(snap_shot_single)
+                    else:
+                        train_x += [i for i in snap_shot_single]
+                elif mode == "sae" or mode == "internal_only":
                     #latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
                     with torch.inference_mode():
                         snap_shot_single = torch.from_numpy(snap_shot_single)
-                        latent_activations, info = encoder.encode(snap_shot_single.to(encoder.device))
-                    train_x += [i for i in latent_activations]
-                train_y += store_y[dataset_name][key]
+                        if mode == 'sae':
+                            latent_activations, info = encoder.encode(snap_shot_single.to(encoder.device))
+                        elif mode == "internal_only":
+                            latent_activations = snap_shot_single
+                        if model_type.lower() == "lstm":
+                            train_x[dataset_name][key] = latent_activations.cpu()
+                        else:
+                            train_x += [i for i in latent_activations]
+                if model_type.lower() == "lstm":
+                    train_y[dataset_name][key] = store_y[dataset_name][key]
+                else:
+                    train_y += store_y[dataset_name][key]
     else:
+        if model_type.lower() == "lstm":
+            train_x = {key: {} for key in dataset_list}
+            train_y = {key: {} for key in dataset_list}
         for idx in range(len(data_line_token_pair[0])):
             #cleaner = utils.ModelOutputCleaner(start_token, model_name)
             data = data_line_token_pair[0][idx]
@@ -338,14 +360,26 @@ def main(
                 if mode == "lbl":
                     al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
                     snapshot_x[data_class_name][key] = al_result
-                    train_x += [i for i in al_result]
-                elif mode == "sae":
+                    if model_type.lower() == "lstm":
+                        train_x[data_class_name][key] = torch.stack(al_result)
+                    else:
+                        train_x += [i for i in al_result]
+                elif mode == "sae" or mode == "internal_only":
                     before_latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, None)
                     with torch.inference_mode():
-                        latent_activations, info = encoder.encode(before_latent_activations.to(encoder.device))
+                        if mode == "sae":
+                            latent_activations, info = encoder.encode(before_latent_activations.to(encoder.device))
+                        elif mode == "internal_only":
+                            latent_activations = before_latent_activations
                     snapshot_x[data_class_name][key] = before_latent_activations.cpu().numpy()
-                    train_x += [i for i in latent_activations]
-                train_y += label_dict[key]
+                    if model_type.lower() == "lstm":
+                        train_x[data_class_name][key] = latent_activations.cpu()
+                    else:
+                        train_x += [i for i in latent_activations]
+                if model_type.lower() == "lstm":
+                    train_y[data_class_name][key] = label_dict[key]
+                else:
+                    train_y += label_dict[key]
                 store_y[data_class_name][key] = label_dict[key]
         torch.save({"snapshot_x": snapshot_x, "store_y": store_y}, training_data_path)
     
@@ -355,17 +389,24 @@ def main(
     #    al_result = collect_attention_map(attn_snapshot, attn_layer, input_token_length, candidate_tokens)
     #    train_x += [i for i in al_result]
     #    train_y += label_dict[key]
-    train_x = np.stack(train_x)
-    logger.info(f"Train X shape: {train_x.shape}")
-    logger.info(f"Train Y Pos Label: {sum(train_y)}")
-    
+    if model_type.lower() != "lstm":
+        train_x = np.stack(train_x)
+        logger.info(f"Train X shape: {train_x.shape}")
+        logger.info(f"Train Y Pos Label: {sum(train_y)}")
+    else:
+        train_x, train_y = flat_data_dict(train_x, train_y)
+        logger.info(f"Train X shape: {sum([train_x[key].shape[0] for key in train_x])}")
+        logger.info(f"Train Y Pos Label: {sum([sum(train_y[key]) for key in train_y])}")
     if mode == "lbl":
         clf = LBLRegression()
-        clf.fit(train_x, train_y, "mlp", fit_model_param, layer)
-    elif mode == "sae":
+        clf.fit(train_x, train_y, model_type, fit_model_param, layer)
+    elif mode == "sae" or mode == "internal_only":
         clf = EncoderClassifier()
-        clf.fit(train_x, train_y, "mlp", fit_model_param, encoder)
+        clf.fit(train_x, train_y, model_type, fit_model_param, encoder)
     clf.save(model_save_path)
+    accuracy, pred_profiler = clf.evaluate(train_x, train_y)
+    logger.info(f"Accuracy on training data: {accuracy}")
+    #torch.save(pred_profiler, "pred_label_recoreder.pt")
     
     
 if __name__ == "__main__":
