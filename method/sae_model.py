@@ -43,7 +43,7 @@ class Autoencoder(nn.Module):
         self.pre_bias = nn.Parameter(torch.zeros(n_inputs))
         self.project_dim = project_dim
         if self.project_dim is not None:
-            self.projection: nn.Module = nn.Linear(n_inputs, project_dim)
+            self.projection: nn.Module = nn.Linear(n_latents, project_dim)
         
         self.encoder: nn.Module = nn.Linear(n_inputs, n_latents, bias=False)
         #nn.init.kaiming_uniform_(self.encoder.weight)
@@ -128,8 +128,9 @@ class Autoencoder(nn.Module):
 
         return latents_pre_act, latents, recons
     
-    def projection_forward(self, latens: torch.Tensor) -> torch.Tensor:
-        return self.projection(latens)
+    def projection_forward(self, latents: torch.Tensor) -> torch.Tensor:
+        #latents, _ = self.encode(x)
+        return torch.nn.functional.sigmoid(self.projection(latents))
     
     def update_data_mean(self, x: torch.Tensor):
         assert len(x.shape) == 2
@@ -153,6 +154,7 @@ class Autoencoder(nn.Module):
     ) -> "Autoencoder":
         n_latents, d_model = state_dict["encoder.weight"].shape
         tied = state_dict.pop("tied", False)
+        project_dim = state_dict.pop("project_dim", None)
         # Retrieve activation
         activation_class_name = state_dict.pop("activation", "ReLU")
         activation_class = ACTIVATIONS_CLASSES.get(activation_class_name, nn.ReLU)
@@ -172,7 +174,12 @@ class Autoencoder(nn.Module):
             if hasattr(activation, "load_state_dict"):
                 activation.load_state_dict(activation_state_dict, strict=strict)
 
-        autoencoder = cls(n_latents, d_model, activation=activation, normalize=normalize, tied=tied)
+        autoencoder = cls(n_latents, 
+                          d_model, 
+                          activation=activation, 
+                          normalize=normalize, 
+                          tied=tied, 
+                          project_dim=project_dim)
         # Load remaining state dict
         autoencoder.load_state_dict(state_dict, strict=strict)
         return autoencoder
@@ -184,6 +191,7 @@ class Autoencoder(nn.Module):
             sd[prefix + "activation_state_dict"] = self.activation.state_dict()
         sd["normalize"] = self.normalize
         sd["tied"] = isinstance(self.decoder, TiedTranspose)
+        sd["project_dim"] = self.project_dim
         return sd
 
     @property
@@ -279,14 +287,27 @@ def normalized_mean_squared_error(
 
 
 def contrastive_loss(original: torch.Tensor, 
-                     mutated: torch.Tensor, 
+                     mutated: torch.Tensor,
+                     model, 
                      norm=True, 
-                     margin=2.0):
+                     margin=1.5):
     if norm == True:
         original = original / torch.norm(original, p=2)
         mutated = mutated / torch.norm(mutated, p=2)
     loss = max(0, margin - torch.dist(original, mutated))
     return loss
+
+def CCS_loss(
+    original: torch.Tensor,
+    mutated: torch.Tensor,
+    model: Autoencoder,
+):
+    original_proj = model.projection_forward(original)
+    mutated_proj = model.projection_forward(mutated)
+    l_consis = (mutated_proj - (1 - original_proj))**2
+    l_conf =   torch.min(original_proj, mutated_proj)**2
+    return (l_consis.mean() + l_conf.mean()) / 2
+    
 
 def normalized_L1_loss(
     latent_activations: torch.Tensor,

@@ -12,7 +12,7 @@ import math
 import os
 import torchinfo
 
-from sae_model import Autoencoder, TopK, normalized_mean_squared_error, contrastive_loss
+from sae_model import Autoencoder, TopK, normalized_mean_squared_error, contrastive_loss, CCS_loss
 from extract.naive_store import NaiveTensorStore, VariedKeyTensorStore
 
 def compute_grad_norm(model):
@@ -148,11 +148,17 @@ def training_one_epoch_contrastive(sae,
             ori_latents_pre_act, ori_latents, ori_recons = sae(original)
             mutated = mutated.to(sae.device)
             mut_latents_pre_act, mut_latents, mut_recons = sae(mutated)
-            recon_loss = recon_loss_fn(ori_recons, original) + recon_loss_fn(mut_recons, mutated)
+            if sae.dataset_level_norm:
+                original_target = original - sae.data_mean
+                mutated_target = mutated - sae.data_mean
+            else:
+                original_target = original
+                mutated_target = mutated
+            recon_loss = recon_loss_fn(ori_recons, original_target) + recon_loss_fn(mut_recons, mutated_target)
             if contrastive_loss_fn is None:
                 total_loss = recon_loss
             else:
-                total_loss = recon_loss + contrastive_loss_fn(ori_latents[original_index], mut_latents[mutated_index])
+                total_loss = recon_loss + contrastive_loss_fn(ori_latents[original_index], mut_latents[mutated_index], sae)
                 #final_pair = ori_latents[ori_div_list]
                 #self_contrastive = final_pair / final_pair.norm(dim=-1, keepdim=True)
                 #upper_triangular = torch.triu(torch.cdist(self_contrastive, self_contrastive), diagonal=1)
@@ -271,10 +277,12 @@ def main(
     store_type = config_dict["task_config"].get("store_type", "naive")
     dataset_level_norm = config_dict["task_config"].get("dataset_level_norm", False)
     assert store_type in ["naive", "varied"]
-    contrastive = config_dict["task_config"].get("contrastive", False)
+    #contrastive = config_dict["task_config"].get("contrastive", False)
     cold_start_epoch = config_dict["task_config"].get("cold_start_epoch", 1)
     tied = config_dict["task_config"].get("tied", False) 
     model_save_freq_prop = config_dict["task_config"].get("model_save_freq_prop", 1)
+    contrastive_loss_fn = config_dict["task_config"].get("contrastive_loss_fn", None)
+    assert contrastive_loss_fn in [None, "contrastive_loss", "ccs_loss"]
     model_save_freq = max(int(epoch_num * model_save_freq_prop), 1)
     
     model_setting = {
@@ -285,7 +293,10 @@ def main(
         "tied": tied
     }
     save_prefix = f"n_latents_{sae_hidden}_n_inputs_{hidden_neuron}"
-    
+    if contrastive_loss_fn.lower() == "ccs_loss":
+        project_dim = 1
+    else:
+        project_dim = None
     sae = Autoencoder(
         sae_hidden,
         hidden_neuron,
@@ -293,6 +304,7 @@ def main(
         normalize=normalize,
         tied=tied,
         dataset_level_norm=dataset_level_norm,
+        project_dim=project_dim,
     )
     sae = sae.to(device)
     
@@ -315,8 +327,8 @@ def main(
     if dataset_level_norm:
         logger.info("Enable dataset level normalization")
         sae = obtain_dataset_mean(sae, data_loader_list)
-    #optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, sae.parameters()), lr=learning_rate,  eps=eps)
-    optimizer = torch.optim.AdamW(sae.parameters(), lr=learning_rate,  eps=eps)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, sae.parameters()), lr=learning_rate,  eps=eps)
+    #optimizer = torch.optim.AdamW(sae.parameters(), lr=learning_rate,  eps=eps)
     if scheduler_type == "cos":
         training_step = sum([len(i) for i in data_loader_list]) * epoch_num
         warmup_step = math.floor(training_step * 0.1) # Hard-code. TODO: Improve this. 
@@ -326,7 +338,10 @@ def main(
     else:
         scheduler = None
     loss_fn = normalized_mean_squared_error
-    contrastive_loss_fn = contrastive_loss
+    if contrastive_loss_fn.lower() == "contrastive_loss":
+        contrastive_loss_fn = contrastive_loss
+    elif contrastive_loss_fn.lower() == "ccs_loss":
+        contrastive_loss_fn = CCS_loss
     if wandb_info is not None:
         wandb.login(key=wandb_info["key"])
         wandb_proj_name = wandb_info["proj_name"]
@@ -336,7 +351,7 @@ def main(
         wandbrun = None
     all_loss_list = []
     for epoch in range(epoch_num):
-        if contrastive is False:
+        if contrastive_loss_fn is None:
             sae, loss_list = training_one_epoch(sae, 
                                                 data_loader_list, 
                                                 optimizer, 
@@ -381,7 +396,7 @@ def main(
              sae = sae.to(device)
         logger.info(f'Epoch: [{epoch}] Finished. Loss: {np.average(loss_list)}\t')
 
-    if contrastive is False:
+    if contrastive_loss_fn is None:
         eval_loss = evaluate(sae, data_loader_list, loss_fn)
     else:
         eval_loss = evaluate_contrastive(sae, data_loader_list, loss_fn)
