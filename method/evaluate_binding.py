@@ -12,6 +12,7 @@ from pathlib import Path
 import json
 import gc
 import time
+import copy
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 
 import sys
@@ -23,6 +24,10 @@ import method.extract.extract_util as extract_util
 from method import detect_model
 import utility.utils as utils
 from task import dataset_utils
+
+
+STORE = 0
+LOAD = 1
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 
@@ -55,45 +60,56 @@ def evaluate_binding(data,
                  counter=0,
                  topk=5,
                  max_profile_token_length=4096,
-                 extract_code=True):
+                 extract_code=True,
+                 before_act_dict=None,
+                 ):
     oom_keys = []
     result = dict()
-    pred_profiler = list()
+    #pred_profiler = list()
+    if before_act_dict is None:
+        mode = STORE
+        before_act_dict = dict()
+    else:
+        mode = LOAD
     for key in tqdm.tqdm(key_list):
-        if extract_code:
-            code_blocks_info = None
+        if mode == STORE:
+            if extract_code:
+                code_blocks_info = None
+            else:
+                code_blocks_info = [[0, len(data[key]["str_output"])]]
+            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
+            token_length = len(data[key]['token_output'])
+            tail_truncate = 0
+            input_token_length = data[key]['input_length']
+            if token_length > max_profile_token_length:
+                tail_truncate = token_length - max_profile_token_length
+                input_token_length = max(input_token_length - tail_truncate, 0)
+                
+            tokenized_info = {"input_ids": torch.tensor(data[key]['token_output']).reshape(1, -1)[:, tail_truncate:], 
+                            "attention_mask": torch.tensor([1 for i in range(len(data[key]['token_output']))]).reshape(1, -1)
+                            }
+            #pred_profiler.append(copy.deepcopy(tokenized_info))
+            with torch.inference_mode():
+                # If transformer.__version__ == v4.45.1, directly import it from transformers.cache_utils 
+                past_key_values = extract_util.OffloadedCache() # GPU Memory Efficient
+                tokenized_info["past_key_values"] = past_key_values
+                try:
+                    #snapshot = model.forward(**tokenized_info, output_attentions=True)
+                    #snapshot, hook_info = recorder.forward(tokenized_info)
+                    pred_result, pred_input = detection_model.predict_using_recorder(recorder, tokenized_info, input_token_length, candidate_tokens)
+                except torch.cuda.OutOfMemoryError as e:
+                    oom_keys.append(key)
+                    torch.cuda.empty_cache()
+                    logger.info(f"Out of Memory error occurred for key: {key}. Moving to next.")
+                    continue
+            before_act_dict[key] = copy.deepcopy(detection_model.cache)
         else:
-            code_blocks_info = [[0, len(data[key]["str_output"])]]
-        candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
-        token_length = len(data[key]['token_output'])
-        tail_truncate = 0
-        input_token_length = data[key]['input_length']
-        if token_length > max_profile_token_length:
-            tail_truncate = token_length - max_profile_token_length
-            input_token_length = max(input_token_length - tail_truncate, 0)
-            
-        tokenized_info = {"input_ids": torch.tensor(data[key]['token_output']).reshape(1, -1)[:, tail_truncate:], 
-                        "attention_mask": torch.tensor([1 for i in range(len(data[key]['token_output']))]).reshape(1, -1)
-                        }
-        #pred_profiler.append(copy.deepcopy(tokenized_info))
-        with torch.inference_mode():
-            # If transformer.__version__ == v4.45.1, directly import it from transformers.cache_utils 
-            past_key_values = extract_util.OffloadedCache() # GPU Memory Efficient
-            tokenized_info["past_key_values"] = past_key_values
-            try:
-                #snapshot = model.forward(**tokenized_info, output_attentions=True)
-                #snapshot, hook_info = recorder.forward(tokenized_info)
-                pred_result, pred_input = detection_model.predict_using_recorder(recorder, tokenized_info, input_token_length, candidate_tokens)
-            except torch.cuda.OutOfMemoryError as e:
-                oom_keys.append(key)
-                torch.cuda.empty_cache()
-                logger.info(f"Out of Memory error occurred for key: {key}. Moving to next.")
-                continue
+            pred_result, pred_input = detection_model.predict(x=before_act_dict[key])
         #attn_snapshot = hook_info[layer]
         #del snapshot
         # Inference process of LBL baseline method
         #pred_result = detection_model.predict([attn_snapshot], input_token_length, candidate_tokens)
-        pred_profiler.append(pred_input)
+        #pred_profiler.append(pred_input)
         pred_result = pred_result[:, 1]
         result[key] = pred_result
         rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk]
@@ -106,7 +122,7 @@ def evaluate_binding(data,
         counter += 1
         
     #torch.save(pred_profiler, "pred_label_recoreder.pt")
-    return score, counter, result, oom_keys
+    return score, counter, result, oom_keys, before_act_dict
     
 @app.command()
 def main(
@@ -116,6 +132,7 @@ def main(
     result_output_path: Annotated[Path, typer.Option()],
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
     detection_model_path: Annotated[Path, typer.Option()] = None,
+    before_dict_save_path: Annotated[Path, typer.Option()] = None,
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
@@ -160,6 +177,11 @@ def main(
     # ===== Load Data =====
     data = utils.load_shelve(data_path)
     
+    if os.path.exists(before_dict_save_path):
+        before_dict = torch.load(before_dict_save_path)
+    else:
+        before_dict = None
+    
     #if task.lower() == "defects4j":
     #    data_path = config_dict["task_config"]["repair_data_path"]
     #    loc_folder = config_dict["task_config"]["repair_loc_folder"]
@@ -193,17 +215,19 @@ def main(
         detection_model = detect_model.EncoderClassifier.load(detection_model_path)
     #lbl_model.load(lbl_model_path)
     
-    score, counter, first_result, oom_keys = evaluate_binding(data, 
-                                                        evaluate_key_list, 
-                                                        important_token_info, 
-                                                        recorder, 
-                                                        tokenizer,
-                                                        detection_model, 
-                                                        language, 
-                                                        layer,
-                                                        max_profile_token_length=max_profile_token_length,
-                                                        extract_code=extract_code
-                                                    )
+    score, counter, first_result, oom_keys, before_dict_1 = \
+    evaluate_binding(data, 
+                    evaluate_key_list, 
+                    important_token_info, 
+                    recorder, 
+                    tokenizer,
+                    detection_model, 
+                    language, 
+                    layer,
+                    max_profile_token_length=max_profile_token_length,
+                    extract_code=extract_code,
+                    before_act_dict=before_dict
+                    )
     
     second_result = dict()
     if len(oom_keys) > 0:
@@ -218,25 +242,35 @@ def main(
             recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
         elif collect_type == "hidden":
             recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
-        score, counter, second_result, oom_keys = evaluate_binding(data, 
-                                                            oom_keys, 
-                                                            important_token_info, 
-                                                            recorder, 
-                                                            tokenizer,
-                                                            detection_model, 
-                                                            language, 
-                                                            layer,
-                                                            score=score,
-                                                            counter=counter,
-                                                            max_profile_token_length=max_profile_token_length,
-                                                            extract_code=extract_code
-                                                            )
+        score, counter, second_result, oom_keys, before_dict_2 = \
+            evaluate_binding(data, 
+                            oom_keys, 
+                            important_token_info, 
+                            recorder, 
+                            tokenizer,
+                            detection_model, 
+                            language, 
+                            layer,
+                            score=score,
+                            counter=counter,
+                            max_profile_token_length=max_profile_token_length,
+                            extract_code=extract_code,
+                            before_act_dict=before_dict
+                        )
         if len(oom_keys) > 0:
             logger.error("OOM error still exists after fallback inference. Ignore them.")
             logger.error("OOM keys: {}".format(oom_keys))
     
     topk_recorder = {"top5": score / counter}
     result = {**first_result, **second_result}
+    if before_dict is None and before_dict_save_path is not None:
+        before_dict = {**before_dict_1, **before_dict_2}
+        torch.save(before_dict, before_dict_save_path)
+    else:
+        del before_dict_1
+        del before_dict_2
+    
+    
     
     for topk_iter in [1, 3, 10]:
         score = 0

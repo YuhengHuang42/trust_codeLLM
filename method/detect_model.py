@@ -44,7 +44,7 @@ def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, 
     #return lr
     return al_result
     
-def collect_hidden_states(hidden_map, input_token_length, output_seg, encoder):
+def collect_hidden_states(hidden_map, input_token_length, output_seg, encoder, before_enc=None):
     """
     Collect hidden states as features for hallucination detection.
     ---
@@ -52,20 +52,25 @@ def collect_hidden_states(hidden_map, input_token_length, output_seg, encoder):
         hidden_map: Tuple[Tensor]. Each layer's hidden states, which has the shape [1, token_num, hidden_size].
         output_seg: List[List]: List of segment tokens. It should be str_output version
     """
-    hidden_all = list()
-    for seg in output_seg:
-        real_seg = [i + input_token_length  for i in seg]
-        line_split_token = max(real_seg)
-        hidden_seg = hidden_map[line_split_token] # (token_num, hidden_size)
-        hidden_all.append(hidden_seg)
-    hidden_all = torch.stack(hidden_all)
+    if before_enc is None:
+        hidden_all = list()
+        for seg in output_seg:
+            real_seg = [i + input_token_length  for i in seg]
+            line_split_token = max(real_seg)
+            hidden_seg = hidden_map[line_split_token] # (token_num, hidden_size)
+            hidden_all.append(hidden_seg)
+        hidden_all = torch.stack(hidden_all)
+    else:
+        if isinstance(before_enc, np.ndarray):
+            before_enc = torch.from_numpy(before_enc)
+        hidden_all = before_enc
     if encoder is not None:
         with torch.inference_mode():
             hidden_all = hidden_all.to(encoder.device)
             latent_activations, info = encoder.encode(hidden_all)
-        return latent_activations.cpu()
+        return latent_activations.cpu(), hidden_all.cpu()
     else:
-        return hidden_all
+        return None, hidden_all.cpu()
 
 def flat_data_dict(data_dict_x, data_dict_y):
     x = dict()
@@ -110,6 +115,11 @@ class EncoderClassifier():
             if balanced:
                 smote = SMOTE()
                 train_x, train_y = smote.fit_resample(train_x, train_y)
+        if "sorting_code" in self.fit_model_param:
+            self.sorting_code = self.fit_model_param.pop("sorting_code")
+            train_x = obtain_sorted_code(train_x, encoder.activation.k)
+        else:
+            self.sorting_code = False
         self.model_type = model_type
         self.encoder = encoder
         if self.model_type.lower() == "logistic":
@@ -133,7 +143,8 @@ class EncoderClassifier():
                      "param": self.fit_model_param, 
                      "model_type": self.model_type,
                      "device": encoder_device,
-                     "encoder": encoder_state_dict
+                     "encoder": encoder_state_dict,
+                     "sorting_code": self.sorting_code
                      }, 
                     path
                     )
@@ -147,6 +158,7 @@ class EncoderClassifier():
         model.model_type = loaded_info["model_type"]
         model.dim_red = loaded_info["dim_red"]
         device = loaded_info["device"]
+        model.sorting_code = loaded_info["sorting_code"] if "sorting_code" in loaded_info else False
         if loaded_info["encoder"] is not None:
             encoder = Autoencoder.from_state_dict(loaded_info["encoder"])
             model.encoder = encoder.to(device)
@@ -160,12 +172,16 @@ class EncoderClassifier():
             self.encoder = self.encoder.to(device)
         return self
     
-    def predict(self, layer_info, input_token_length, candidate_tokens):
-        latent = collect_hidden_states(layer_info, input_token_length, candidate_tokens, self.encoder).numpy().astype(np.float32)
+    def predict(self, layer_info=None, input_token_length=None, candidate_tokens=None, x=None):
+        assert (layer_info is not None or x is not None), "Either layer_info or before_enc should be provided."
+        latent, before_enc = collect_hidden_states(layer_info, input_token_length, candidate_tokens, self.encoder, before_enc=x)
+        latent = latent.numpy().astype(np.float32)
+        self.cache = before_enc.numpy().astype(np.float32)
         if self.dim_red is not None:
             latent = self.dim_red.transform(latent)
+        if self.sorting_code:
+            latent = obtain_sorted_code(latent, self.encoder.activation.k)
         y = self.clf.predict_proba(latent)
-        self.cache = latent
         return y
     
     def predict_using_recorder(self, recorder, tokenized_info, input_token_length, candidate_tokens):
@@ -175,7 +191,7 @@ class EncoderClassifier():
             hidden_states = hidden_states[0][0] # (token_num, hidden_size)
             recorder.clear_cache()
             y = self.predict(hidden_states, input_token_length, candidate_tokens)
-            #latent_activations = collect_hidden_states(hidden_states, input_token_length, candidate_tokens, self.encoder).numpy()
+            #latent_activations, _ = collect_hidden_states(hidden_states, input_token_length, candidate_tokens, self.encoder).numpy()
             #y = self.clf.predict_proba(latent_activations)
             return y, self.cache
     
@@ -184,7 +200,10 @@ class EncoderClassifier():
         if self.model_type.lower() != "lstm":
             pred_label_recoreder = []
             for idx, item in enumerate(x):
-                pred = self.clf.predict_proba(item.reshape(1, -1))
+                item = item.reshape(1, -1)
+                if self.sorting_code:
+                    item = obtain_sorted_code(item, self.encoder.activation.k)
+                pred = self.clf.predict_proba(item)
                 pred_result = pred[:, 1]
                 pred_profiler.append(pred_result)
                 pred_label = pred_result > 0.5
@@ -193,7 +212,10 @@ class EncoderClassifier():
             pred_label_recoreder = dict()
             key_list = list(x.keys())
             for key in key_list:
-                pred = self.clf.predict_proba(x[key].reshape(1, -1))
+                item = x[key].reshape(1, -1)
+                if self.sorting_code:
+                    item = obtain_sorted_code(item, self.encoder.activation.k)
+                pred = self.clf.predict_proba(item)
                 pred_result = pred[:, 1]
                 pred_profiler.append(pred_result)
                 pred_label = pred_result > 0.5
@@ -237,9 +259,11 @@ class LBLRegression():
         model.model_type = loaded_info["model_type"]
         return model
     
-    def predict(self, attn_snapshot, input_token_length, candidate_tokens):
-        al_result = collect_attention_map(attn_snapshot, self.attn_layer, input_token_length, candidate_tokens)
-        x = np.stack(al_result).astype(np.float32)
+    def predict(self, attn_snapshot=None, input_token_length=None, candidate_tokens=None, x=None):
+        assert attn_snapshot is not None or x is not None, "Either attn_snapshot or before_enc should be provided."
+        if x is None:
+            al_result = collect_attention_map(attn_snapshot, self.attn_layer, input_token_length, candidate_tokens)
+            x = np.stack(al_result).astype(np.float32)
         self.cache = x
         y = self.clf.predict_proba(x)
         return y
@@ -356,6 +380,25 @@ class LSTMPredictor(nn.Module):
     def device(self):
         return next(self.parameters()).device
         
+
+#def obtain_sorted_code(input_tensor, topk):
+    # Sort the tensor and get the sorted indices
+#    if isinstance(input_tensor, np.array):
+#        input_tensor = torch.from_numpy(input_tensor)
+#    sorted_value, sorted_indices = torch.sort(input_tensor, dim=-1, descending=True)
+#    return  sorted_indices[:, :topk] / input_tensor.shape[-1], sorted_value[:, :topk]
+
+def obtain_sorted_code(input_tensor, topk):
+    # Sort the tensor and get the sorted indices
+    input_tensor = input_tensor
+    sorted_indices = np.argsort(input_tensor)
+    sorted_indices = sorted_indices[..., ::-1][:, :topk]
+
+    sorted_array = np.take_along_axis(input_tensor, sorted_indices, axis=-1)
+    normalized_index = sorted_indices / input_tensor.shape[-1]
+    
+    #return normalized_index#, sorted_array
+    return np.concatenate([normalized_index, sorted_array], axis=-1)
 
 class DictDataset(Dataset):
     def __init__(self, dict_x, dict_y):

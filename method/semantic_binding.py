@@ -301,7 +301,7 @@ def main(
                     else:
                         train_x += [i for i in snap_shot_single]
                 elif mode == "sae" or mode == "internal_only":
-                    #latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
+                    #latent_activations, _ = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
                     with torch.inference_mode():
                         snap_shot_single = torch.from_numpy(snap_shot_single)
                         if mode == 'sae':
@@ -365,7 +365,7 @@ def main(
                     else:
                         train_x += [i for i in al_result]
                 elif mode == "sae" or mode == "internal_only":
-                    before_latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, None)
+                    _, before_latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, None)
                     with torch.inference_mode():
                         if mode == "sae":
                             latent_activations, info = encoder.encode(before_latent_activations.to(encoder.device))
