@@ -513,7 +513,7 @@ def inference_and_collect(
             
             store_info = {
                 "original": {"hidden_states": hidden_states},
-                "start_hidden": {"start_hidden": start_hidden},
+                "start_hidden": start_hidden,
                 "original_split_tok_pos": original_split_tok_pos,   
             }
         else:

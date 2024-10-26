@@ -223,7 +223,7 @@ class VariedKeyTensorStore(Dataset):
             path = os.path.join(self.save_dir, self.shelve_name)
         self.data = PersistentTensorDict(filename=path, mode="a")
 
-    def get_data_loader(self, batch_size, feature_name, shuffle, num_workers, prefetch_factor=2):
+    def get_data_loader(self, batch_size, feature_name, shuffle, num_workers, prefetch_factor=2, next_token_pred=False):
         """
         This function is not class-specific but task-specific.
         But it is put here for interface convenience. 
@@ -246,19 +246,31 @@ class VariedKeyTensorStore(Dataset):
             mutated = list()
             original_index = []
             mutated_index = []
-            original_shift_pointer = 0
+            if next_token_pred:
+                zero_shift = 1
+            else:
+                zero_shift = 0
+            original_shift_pointer = 0 + zero_shift
             ori_div_list = []
-            mutated_shift_pointer = 0
+            mutated_shift_pointer = 0 + zero_shift
             for item in batch_info:
                 item = item.to_dict()
-                original.append(item["original"]["hidden_states"])
-                original_length = item["original"]["hidden_states"].shape[0]
+                original_hidden = item["original"]["hidden_states"]
+                neuron_num = original_hidden.shape[-1]
+                if next_token_pred:
+                    first_hidden = item["start_hidden"].reshape(1, neuron_num)
+                    original_hidden = torch.cat([first_hidden, original_hidden], dim=0)
+                original.append(original_hidden)
+                original_length = original_hidden.shape[0]
                 for key in item["mutated_code"]:
                     original_index.append(original_shift_pointer + item["mutated_code"][key]["contrastive_list_original"])
                     mutated_index.append(mutated_shift_pointer + item["mutated_code"][key]["contrastive_list_mutated"])
-                    mutated.append(item["mutated_code"][key]["hidden_states"])
-                    mutated_shift_pointer += item["mutated_code"][key]["hidden_states"].shape[0]
-                original_shift_pointer += original_length
+                    mutated_hidden = item["mutated_code"][key]["hidden_states"]
+                    if next_token_pred:
+                        mutated_hidden = torch.cat([first_hidden, mutated_hidden], dim=0)
+                    mutated.append(mutated_hidden)
+                    mutated_shift_pointer += (mutated_hidden.shape[0])
+                original_shift_pointer += (original_length)
                 ori_div_list.append(original_shift_pointer - 1)
             return torch.cat(original), torch.cat(mutated), torch.cat(original_index), torch.cat(mutated_index), torch.tensor(ori_div_list)
         data_loader =  DataLoader(self, 
