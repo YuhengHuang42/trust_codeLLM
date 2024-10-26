@@ -507,8 +507,8 @@ def inference_and_collect(
             
             hidden_states = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
             hidden_states = hidden_states[0] # (1, token_num, hidden_size)
-            hidden_states = hidden_states[0, original_split_tok_pos, :] # (split_token_num, hidden_size)
             start_hidden = hidden_states[0, 0, :]
+            hidden_states = hidden_states[0, original_split_tok_pos, :] # (split_token_num, hidden_size)
             recorder.clear_cache()
             
             store_info = {
