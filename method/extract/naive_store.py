@@ -28,6 +28,8 @@ class NaiveTensorStore(Dataset):
         self.allocated_size = allocated_size
         self.config = config
         self.save_dir = save_dir
+        if os.path.exists(save_dir) is False:
+            os.makedirs(save_dir)
         self.data = TensorDict(
             self.turn_config_into_dataset_key_value(config),
             batch_size=[]
