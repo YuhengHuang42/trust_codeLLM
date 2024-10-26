@@ -464,14 +464,14 @@ def wrap_input(item, code, code_split_pos, tokenizer, split_token, contrastive_l
     code_description = item['output']['code_description']
     problem_description = item['output']['problem_description']
     description = problem_description + code_description
-    target_input = context + description + "\n```\n" + code
-    context_str_len = len(context + description + "\n```\n")
+    target_input = context + description + f"{split_token}```{split_token}" + code
+    context_str_len = len(context + description + f"{split_token}```{split_token}")
     input_info = tokenizer(target_input, return_tensors="pt", return_offsets_mapping=True)
     offset_mapping = input_info["offset_mapping"].squeeze().tolist()
     input_info.pop("offset_mapping")
     split_tok_pos = list()
     removal_indices = list()
-    start_token_idx = utils.match_token_in_offset_mapping(offset_mapping, context_str_len, context_str_len)[0] # It should be OK for start_idx == end_idx
+    start_token_idx = utils.match_token_in_offset_mapping(offset_mapping, context_str_len, context_str_len+len(split_token))[0]
     for idx, pos in enumerate(code_split_pos):
         real_pos = pos + context_str_len
         try:
