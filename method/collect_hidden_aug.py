@@ -471,6 +471,7 @@ def wrap_input(item, code, code_split_pos, tokenizer, split_token, contrastive_l
     input_info.pop("offset_mapping")
     split_tok_pos = list()
     removal_indices = list()
+    start_token_idx = utils.match_token_in_offset_mapping(offset_mapping, context_str_len, context_str_len)[0] # It should be OK for start_idx == end_idx
     for idx, pos in enumerate(code_split_pos):
         real_pos = pos + context_str_len
         try:
@@ -483,7 +484,7 @@ def wrap_input(item, code, code_split_pos, tokenizer, split_token, contrastive_l
         split_tok_pos = [-1]
     
     contrastive_list = adjust_indices(contrastive_list, removal_indices)
-    return input_info, split_tok_pos, contrastive_list
+    return input_info, split_tok_pos, contrastive_list, start_token_idx
     
 def inference_and_collect(
     dataset,
@@ -495,7 +496,7 @@ def inference_and_collect(
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=lambda x:x)
     for idx, item in enumerate(tqdm.tqdm(data_loader)):
         item = item[0]
-        input_info, original_split_tok_pos, contrastive_list_original = wrap_input(item, 
+        input_info, original_split_tok_pos, contrastive_list_original, start_token_idx = wrap_input(item, 
                                                                         item['output']['code'],
                                                                         item['output']['code_split_pos'], 
                                                                         tokenizer, 
@@ -507,13 +508,19 @@ def inference_and_collect(
             
             hidden_states = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
             hidden_states = hidden_states[0] # (1, token_num, hidden_size)
-            start_hidden = hidden_states[0, 0, :]
-            hidden_states = hidden_states[0, original_split_tok_pos, :] # (split_token_num, hidden_size)
+            hidden_states = hidden_states[0] # (token_num, hidden_size)
+            end_token_idx = len(hidden_states) - 1
+            start_hidden = hidden_states[start_token_idx, :]
+            last_hidden = hidden_states[end_token_idx, :]
+            hidden_states = hidden_states[original_split_tok_pos, :] # (split_token_num, hidden_size)
             recorder.clear_cache()
             
             store_info = {
-                "original": {"hidden_states": hidden_states},
-                "start_hidden": start_hidden,
+                "original": {"hidden_states": hidden_states,
+                             "start_hidden": start_hidden, 
+                             "last_hidden": last_hidden, 
+                             "start_in": start_token_idx in original_split_tok_pos,
+                             "last_in": end_token_idx in original_split_tok_pos,},
                 "original_split_tok_pos": original_split_tok_pos,   
             }
         else:
@@ -521,7 +528,7 @@ def inference_and_collect(
         if "mutated_code" not in store_info:
             store_info["mutated_code"] = {}
         
-        input_info, mutated_split_tok_pos, contrastive_list_mutated = wrap_input(item,
+        input_info, mutated_split_tok_pos, contrastive_list_mutated, start_token_idx = wrap_input(item,
                                                                                  item['mutated_code']['code'],
                                                                                  item['mutated_code']['code_split_pos'],
                                                                                  tokenizer,
@@ -532,7 +539,11 @@ def inference_and_collect(
         
         hidden_states = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
         hidden_states = hidden_states[0] # (1, token_num, hidden_size)
-        hidden_states = hidden_states[0, mutated_split_tok_pos, :] # (split_token_num, hidden_size)
+        hidden_states = hidden_states[0] # (token_num, hidden_size)
+        end_token_idx = len(hidden_states) - 1
+        start_hidden = hidden_states[start_token_idx, :]
+        last_hidden = hidden_states[end_token_idx, :]
+        hidden_states = hidden_states[mutated_split_tok_pos, :] # (split_token_num, hidden_size)
         
         key_list = [int(i) for i in list(store_info["mutated_code"].keys())]
         if len(key_list) == 0:
@@ -543,7 +554,12 @@ def inference_and_collect(
         store_info["mutated_code"][cur_key] = {"hidden_states": hidden_states, 
                                                "contrastive_list_original": contrastive_list_original,
                                                "contrastive_list_mutated": contrastive_list_mutated, 
-                                               "line_label": item['mutated_code']['line_label']}
+                                               "line_label": item['mutated_code']['line_label'],
+                                                "start_hidden": start_hidden,
+                                                "last_hidden": last_hidden,
+                                                "start_in": start_token_idx in mutated_split_tok_pos,
+                                                "last_in": end_token_idx in mutated_split_tok_pos,
+                                               }
         if run_original:
             store.append(store_info)
         else:
