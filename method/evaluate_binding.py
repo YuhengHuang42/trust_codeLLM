@@ -132,7 +132,7 @@ def main(
     result_output_path: Annotated[Path, typer.Option()],
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
     detection_model_path: Annotated[Path, typer.Option()] = None,
-    before_dict_save_path: Annotated[Path, typer.Option()] = None,
+    before_dict_save_folder: Annotated[Path, typer.Option()] = None,
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
@@ -177,9 +177,16 @@ def main(
     # ===== Load Data =====
     data = utils.load_shelve(data_path)
     
-    if os.path.exists(before_dict_save_path):
-        before_dict = torch.load(before_dict_save_path)
+    if before_dict_save_folder is not None:
+        dataset_identifier = os.path.basename(data_path).split(".")[0]
+        model_identifier = model_name.split("/")[-1]
+        before_dict_save_path = os.path.join(before_dict_save_folder, f"{model_identifier}_{mode}_{collect_type}_extract_code{extract_code}_{dataset_identifier}_before_dict.pt")
+        if os.path.exists(before_dict_save_path):
+            before_dict = torch.load(before_dict_save_path)
+        else:
+            before_dict = None
     else:
+        before_dict_save_path = None
         before_dict = None
     
     #if task.lower() == "defects4j":
@@ -230,6 +237,7 @@ def main(
                     )
     
     second_result = dict()
+    before_dict_2 = dict()
     if len(oom_keys) > 0:
         logger.info("Begin fallback inference for OOM data points")
         del recorder
