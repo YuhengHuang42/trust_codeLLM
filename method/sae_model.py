@@ -290,7 +290,7 @@ def contrastive_loss(original: torch.Tensor,
                      mutated: torch.Tensor,
                      model, 
                      norm=True, 
-                     margin=1.5):
+                     margin=2.0):
     if norm == True:
         original = original / torch.norm(original, p=2)
         mutated = mutated / torch.norm(mutated, p=2)

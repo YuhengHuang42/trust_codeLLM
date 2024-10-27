@@ -104,7 +104,12 @@ def evaluate_binding(data,
                     continue
             before_act_dict[key] = copy.deepcopy(detection_model.cache)
         else:
-            pred_result, pred_input = detection_model.predict(x=before_act_dict[key])
+            if extract_code:
+                code_blocks_info = None
+            else:
+                code_blocks_info = [[0, len(data[key]["str_output"])]]
+            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
+            pred_result = detection_model.predict(x=before_act_dict[key])
         #attn_snapshot = hook_info[layer]
         #del snapshot
         # Inference process of LBL baseline method

@@ -133,7 +133,8 @@ def training_one_epoch_contrastive(sae,
                        print_freq_prop=0.2, 
                        scheduler=None, 
                        wandb_handle=None, 
-                       clip_grad=False):
+                       clip_grad=False,
+                       next_token_pred=False):
     sae.train()
     loss_list = list()
     local_step_num = sum([len(i) for i in data_loader_list])
@@ -141,19 +142,24 @@ def training_one_epoch_contrastive(sae,
     print_freq = round(local_step_num * print_freq_prop)
     for data_loader in data_loader_list:
         for idx, store_batch in enumerate(data_loader):
-            original, mutated, original_index, mutated_index, ori_div_list = store_batch
+            original, mutated, original_index, mutated_index, additional_info = store_batch
             start_time = time.time()
             optimizer.zero_grad()
-            original = original.to(sae.device)
-            ori_latents_pre_act, ori_latents, ori_recons = sae(original)
-            mutated = mutated.to(sae.device)
-            mut_latents_pre_act, mut_latents, mut_recons = sae(mutated)
-            if sae.dataset_level_norm:
-                original_target = original - sae.data_mean
-                mutated_target = mutated - sae.data_mean
-            else:
+            if next_token_pred is False:
+                original_feed = original.to(sae.device)
+                mutated_feed = mutated.to(sae.device)
                 original_target = original
                 mutated_target = mutated
+            else:
+                original_feed = original[0].to(sae.device)
+                mutated_feed = mutated[0].to(sae.device)
+                original_target = original[1].to(sae.device)
+                mutated_target = mutated[1].to(sae.device)
+            ori_latents_pre_act, ori_latents, ori_recons = sae(original_feed)
+            mut_latents_pre_act, mut_latents, mut_recons = sae(mutated_feed)
+            if sae.dataset_level_norm:
+                original_target = original_target - sae.data_mean
+                mutated_target = mutated_target - sae.data_mean
             recon_loss = recon_loss_fn(ori_recons, original_target) + recon_loss_fn(mut_recons, mutated_target)
             if contrastive_loss_fn is None:
                 total_loss = recon_loss
@@ -282,6 +288,9 @@ def main(
     tied = config_dict["task_config"].get("tied", False) 
     model_save_freq_prop = config_dict["task_config"].get("model_save_freq_prop", 1)
     contrastive_loss_fn = config_dict["task_config"].get("contrastive_loss_fn", None)
+    next_token_pred = config_dict["task_config"].get("next_token_pred", False)
+    if next_token_pred is True:
+        assert contrastive_loss_fn is not None
     assert contrastive_loss_fn in [None, "contrastive_loss", "ccs_loss"]
     model_save_freq = max(int(epoch_num * model_save_freq_prop), 1)
     
@@ -337,18 +346,18 @@ def main(
                                                                 num_training_steps=training_step)
     else:
         scheduler = None
+    if wandb_info is not None:
+        wandb.login(key=wandb_info["key"])
+        wandb_proj_name = wandb_info["proj_name"]
+        wandb_exp_name = str(result_output_path) + f"_epoch_{epoch_num}" + f"_contras_loss_{contrastive_loss_fn}"
+        wandbrun = wandb.init(project=wandb_proj_name, name=wandb_exp_name)
+    else:
+        wandbrun = None
     loss_fn = normalized_mean_squared_error
     if contrastive_loss_fn.lower() == "contrastive_loss":
         contrastive_loss_fn = contrastive_loss
     elif contrastive_loss_fn.lower() == "ccs_loss":
         contrastive_loss_fn = CCS_loss
-    if wandb_info is not None:
-        wandb.login(key=wandb_info["key"])
-        wandb_proj_name = wandb_info["proj_name"]
-        wandb_exp_name = str(result_output_path) + f"_epoch_{epoch_num}" 
-        wandbrun = wandb.init(project=wandb_proj_name, name=wandb_exp_name)
-    else:
-        wandbrun = None
     all_loss_list = []
     for epoch in range(epoch_num):
         if contrastive_loss_fn is None:
@@ -380,6 +389,7 @@ def main(
                                                             scheduler=scheduler,
                                                             wandb_handle=wandbrun,
                                                             clip_grad=clip_grad,
+                                                            next_token_pred=next_token_pred
                                                             )
         all_loss_list += loss_list
         if epoch % model_save_freq == 0 or epoch == epoch_num - 1:

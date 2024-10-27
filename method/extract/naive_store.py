@@ -268,19 +268,18 @@ class VariedKeyTensorStore(Dataset):
             This function is used when next token prediction training is enabled.
             Return:
                 original: Collected states of original code. 
-                    Shape: (N, hidden_dim), where N is the sum of collected states in the given batch.
+                    Shape: [(N', hidden_dim), (N', hidden_dim)], where N is the sum of collected states in the given batch.
                 mutated: Collected states of mutated code.
-                    Shape: (M, hidden_dim), where M is the sum of collected states in the given batch.
+                    Shape: [(M', hidden_dim), (M', hidden_dim)]], where M is the sum of collected states in the given batch.
                 original_index: the index used in original for contrastive learning
                     shape: (Num), where Num is the number of instances in the given batch.
                 mutated_index: the index used in mutated code for contrastive learning
                     shape: (Num), where Num is the number of instances in the given batch.
-                next_token_x_y: The training data for next token prediction
-                    Shape: [[(N', hidden_dim), (N', hidden_dim)], (M', hidden_dim), (M', hidden_dim)]]
+                ori_div_list: last token index of every original code instance in the batch 
             """
-            original = list()
+            #original = list()
             original_next_pair = [[], []]
-            mutated = list()
+            #mutated = list()
             mutated_next_pair = [[], []]
             original_index = []
             mutated_index = []
@@ -304,7 +303,7 @@ class VariedKeyTensorStore(Dataset):
                     # Enable next_token prediction and the last token is not included
                     last_hidden = item["last_hidden"].reshape(1, neuron_num)
                     original_hidden = torch.cat([original_hidden, last_hidden], dim=0)
-                original.append(original_hidden)
+                #original.append(original_hidden)
                 original_next_pair[0].append(original_hidden[:-1]) # Next-token prediction
                 original_next_pair[1].append(original_hidden[1:]) # Next-token prediction
                 original_length = original_hidden.shape[0]
@@ -319,22 +318,26 @@ class VariedKeyTensorStore(Dataset):
                     if next_token_pred and not item["mutated_code"][key]["last_in"]:
                         last_hidden = item['mutated_code'][key]["last_hidden"].reshape(1, neuron_num)
                         mutated_hidden = torch.cat([mutated_hidden, last_hidden], dim=0)
-                    original_index.append(original_this_batch_shift + original_shift_pointer + item["mutated_code"][key]["contrastive_list_original"])
-                    mutated_index.append(mutated_this_batch_shift + mutated_shift_pointer + item["mutated_code"][key]["contrastive_list_mutated"])
-                    mutated.append(mutated_hidden)
+                    contrastive_list_original = item["mutated_code"][key]["contrastive_list_original"]
+                    contrastive_list_mutated = item["mutated_code"][key]["contrastive_list_mutated"]
+                    if (contrastive_list_original[-1] + original_this_batch_shift) == original_length - 1:
+                        contrastive_list_original = contrastive_list_original[:-1] # For Input we have already remove the last hidden states, so pop it.
+                        contrastive_list_mutated = contrastive_list_mutated[:-1] # Since original is alread poped, we need to pop the mutated one as well.
+                    elif (contrastive_list_mutated[-1] + mutated_this_batch_shift) ==  mutated_hidden.shape[0] - 1:
+                        contrastive_list_original = contrastive_list_original[:-1]
+                        contrastive_list_mutated = contrastive_list_original[:-1]
+                    original_index.append(original_this_batch_shift + original_shift_pointer + contrastive_list_original)
+                    mutated_index.append(mutated_this_batch_shift + mutated_shift_pointer + contrastive_list_mutated)
+                    #mutated.append(mutated_hidden)
                     mutated_next_pair[0].append(mutated_hidden[:-1])
                     mutated_next_pair[1].append(mutated_hidden[1:])
-                    mutated_shift_pointer += (mutated_hidden.shape[0])
-                original_shift_pointer += original_length
+                    mutated_shift_pointer += (mutated_hidden[:-1].shape[0]) # Because We pop the last
+                original_shift_pointer += original_hidden[:-1].shape[0] # Because we pop the last
                 ori_div_list.append(original_shift_pointer - 1)
-            original_next_pair[0] = torch.cat(original_next_pair[0])
-            original_next_pair[1] = torch.cat(original_next_pair[1])
-            mutated_next_pair[0] = torch.cat(mutated_next_pair[0])
-            mutated_next_pair[1] = torch.cat(mutated_next_pair[1])
-            return torch.cat(original), torch.cat(mutated), \
-                torch.cat(original_index), torch.cat(mutated_index), \
-                [original_next_pair, mutated_next_pair]
-        
+            original_next_pair = [torch.cat(i) for i in original_next_pair]
+            mutated_next_pair = [torch.cat(i) for i in mutated_next_pair]
+            return original_next_pair, mutated_next_pair, torch.cat(original_index), torch.cat(mutated_index), torch.tensor(ori_div_list)
+
         if next_token_pred is False:
             collate_fn = collate_fn_plain
         else:
