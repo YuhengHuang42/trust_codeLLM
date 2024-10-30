@@ -48,6 +48,9 @@ class UniversalMutation:
         line_file_name = "lines.txt"
         command = f"{self.mutator_path} {code_file_name} --lines {line_file_name} --showRules --noFastCheck"
         return_result = self.run_command_with_cache(command, code_file_name, line_file_name, code, lines)
+        if "error" in return_result:
+            logger.error(return_result["error"])
+            raise Exception
         assert return_result['returncode'] == 0
         matches = re.findall(self.pattern, return_result["stdout"], re.DOTALL)
         result = dict()
@@ -251,7 +254,6 @@ class AugPretrainCodedata(PretrainCodedata):
         for idx, label in enumerate(labels):
             if label == self.mutated_label:
                 contrastive_mutated += [idx] * drop_repeat_map.get(idx, 1)
-        assert len(contrastive_original) == len(contrastive_mutated)
         return new_mutated, new_mutated_code_split_pos, labels, [contrastive_original, contrastive_mutated]
 
     def aug_data_single(self, index):
@@ -394,6 +396,7 @@ class AugPretrainCodedata(PretrainCodedata):
                 mutated_op_list = None
                 
                 
+            assert len(contrastive_pair[0]) == len(contrastive_pair[1])
             item["mutated_code"] = {
                 "code": new_mutated,
                 "code_split_pos": new_mutated_code_split_pos,
@@ -854,6 +857,7 @@ def main(
     dataset_name = config_dict['task_config']["dataset_name"]
     mutation_prop = (config_dict['task_config']["mutation_prop"])
     feature_key_list = config_dict['task_config']["feature_key_list"]
+    dataset_path_list = config_dict['task_config'].get("dataset_path_list", None)
     
     cache_dir = None
     if "HF_HOME" in config_dict["system_setting"]:
@@ -875,13 +879,17 @@ def main(
         )
     else:
         aug_times = len(mutation_prop)
-        data = AugPretrainCodedata(
-            float(mutation_prop[0]),
-            dataset_name,
-            feature_key_list,
-            preprocess_all_in_memory=True,
-            split_token=split_token
-        )
+        if dataset_path_list is not None:
+            data = AugPretrainCodedata.load(dataset_path_list[0])
+            aug_times = len(dataset_path_list)
+        else:
+            data = AugPretrainCodedata(
+                float(mutation_prop[0]),
+                dataset_name,
+                feature_key_list,
+                preprocess_all_in_memory=True,
+                split_token=split_token
+            )
     #instance_real_num = data.compute_all_inference_num()
     #store = naive_store.NaiveTensorStore()
     store = naive_store.VariedKeyTensorStore()
@@ -899,13 +907,16 @@ def main(
     
     for i in range(1, aug_times):
         # dataset.aug_data_all()
-        data = AugPretrainCodedata(
-        float(mutation_prop[i]),
-        dataset_name,
-        feature_key_list,
-        preprocess_all_in_memory=True,
-        split_token=split_token
-    )
+        if dataset_path_list is not None:
+            data = AugPretrainCodedata.load(dataset_path_list[i])
+        else:
+            data = AugPretrainCodedata(
+            float(mutation_prop[i]),
+            dataset_name,
+            feature_key_list,
+            preprocess_all_in_memory=True,
+            split_token=split_token
+        )
         inference_and_collect(
             data,
             recorder,
