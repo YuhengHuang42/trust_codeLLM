@@ -1,5 +1,5 @@
-import datasets
 from torch.utils.data import Dataset
+import datasets
 from loguru import logger
 import typer
 from typing_extensions import Annotated
@@ -14,6 +14,10 @@ import random
 import math
 import pandas as pd 
 import numpy as np
+import subprocess
+import shutil
+import re
+import json
 
 import sys
 project_root = Path(__file__).resolve().parent.parent
@@ -26,6 +30,88 @@ from method.extract import naive_store
 from method.collect_hidden import PretrainCodedata
 
 
+class UniversalMutation:
+    def __init__(self, cache_dir: str, mutator_path: str):
+        self.cache_dir = cache_dir
+        #self.pattern = r"PROCESSING MUTANT:\s*(\d+):\s*(.*?)\s*==>\s*(.*?)\.\.\.(VALID|INVALID|REDUNDANT)"
+        #self.pattern = r"PROCESSING MUTANT:\s*(\d+):(.*?) ==> (.*?)\.\.\.(VALID|INVALID|REDUNDANT)"
+        self.pattern = r"PROCESSING MUTANT:\s*(\d+): (.*?)  ==>  (.*?)\.\.\.(VALID|INVALID|REDUNDANT)"
+        self.mutator_path = mutator_path # https://github.com/agroce/universalmutator/tree/master?tab=readme-ov-file
+    
+    def _mutate_code(self, code, line_number_list: list):
+        """
+        Mutate the given code according to the line_number_list.
+        We anticpate the line_number_list is 0-based.
+        """
+        lines = "\n".join([str(i+1) for i in line_number_list]) # Turn to 1-based.
+        code_file_name = "code.txt"
+        line_file_name = "lines.txt"
+        command = f"{self.mutator_path} {code_file_name} --lines {line_file_name} --showRules --noFastCheck"
+        return_result = self.run_command_with_cache(command, code_file_name, line_file_name, code, lines)
+        assert return_result['returncode'] == 0
+        matches = re.findall(self.pattern, return_result["stdout"], re.DOTALL)
+        result = dict()
+        for match in matches:
+            line_number, before, after, status = match
+            line_number = int(line_number)
+            before = before  # Clean up extra spaces in the "before" part
+            after = after.split('...')[0]  # Capture only before '...' in the "after" part
+            if status != "VALID":
+                continue
+            if (line_number - 1) not in result:
+                result[line_number - 1] = [before, []]
+            result[line_number - 1][1].append(after)
+        return result
+        
+        
+    def run_command_with_cache(self, command, code_file_name, line_file_name, code, lines):
+        """
+        Run the command in a shell with a temporary cache directory.
+        Only return what has been left in the stdout.
+        """
+        try:
+            assert not os.path.exists(self.cache_dir)
+            # Step 1: Create a temporary directory (cache folder)
+            os.makedirs(self.cache_dir)
+            
+            # Step 2: Create a file in the cache folder and write the content to it
+            file_path = os.path.join(self.cache_dir, code_file_name)
+            line_path = os.path.join(self.cache_dir, line_file_name)
+            with open(file_path, 'w') as f:
+                f.write(code)
+                
+            with open(line_path, 'w') as f:
+                f.write(lines)
+
+            # Step 3: Run the command in the cache directory
+            process = subprocess.Popen(
+                command, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                shell=True, 
+                text=True, 
+                cwd=self.cache_dir,
+            )
+            
+            stdout, stderr = process.communicate()
+
+            # Step 4: Record the output (stdout, stderr) and the return code
+            result = {
+                'stdout': stdout,
+                'stderr': stderr,
+                'returncode': process.returncode
+            }
+
+            return result
+
+        except Exception as e:
+            return {'error': str(e)}
+        
+        finally:
+            # Step 5: Delete the cache folder once the command has finished executing
+            if os.path.exists(self.cache_dir):
+                shutil.rmtree(self.cache_dir)
+            
 def remove_empty_lines(input_string):
     # Split the string into lines
     lines = input_string.splitlines()
@@ -46,7 +132,11 @@ class AugPretrainCodedata(PretrainCodedata):
                  preprocess_all_in_memory=False,
                  split_token="\n",
                  original_label=1,
-                 mutated_label=2
+                 mutated_label=2,
+                 external_mutator=None,
+                 meta_info_file_name = "meta.json",
+                 data_file_name = "data.json",
+                 load_from_disk = False,
                  ):
         """
         
@@ -58,11 +148,14 @@ class AugPretrainCodedata(PretrainCodedata):
                 (e.g., data length, returned item). 
         """
         # datasets.arrow_dataset.Dataset
-        super().__init__(dataset_id, feature_key_list, preprocess_all_in_memory, split_token)
+        super().__init__(dataset_id, feature_key_list, preprocess_all_in_memory, split_token, load_from_disk)
         self.mutate_prop = mutate_prop
         self.original_label = original_label
         self.mutated_label = mutated_label
-        if preprocess_all_in_memory:
+        self.external_mutator = external_mutator
+        self.meta_info_file_name = meta_info_file_name
+        self.data_file_name = data_file_name
+        if preprocess_all_in_memory and not load_from_disk:
             self.aug_data_all()
         
     def _get_mutated_code(self, idx, code, code_split_pos, mutated_pos_list, mutated_op_list):
@@ -169,20 +262,138 @@ class AugPretrainCodedata(PretrainCodedata):
             item = self.data[index]
             item_list = self._preprocess_data_single(item) # Return List
         for item in item_list:
-            code = item['output']['code']
-            code_split_pos = item['output']['code_split_pos']
-            mutated_pos_list = [i for i in range(len(code_split_pos))]
-            random.shuffle(mutated_pos_list)
-            mutated_num = max(math.ceil(len(mutated_pos_list) * self.mutate_prop), 1)
-            mutated_pos_list = mutated_pos_list[:mutated_num]
-            if mutated_num <= 2:
-                # To avoid no code left error
-                mutated_op_list = ["switch_outside"] * mutated_num
+            if self.external_mutator is None:
+                # Default Mode
+                code = item['output']['code']
+                code_split_pos = item['output']['code_split_pos']
+                mutated_pos_list = [i for i in range(len(code_split_pos))]
+                random.shuffle(mutated_pos_list)
+                mutated_num = max(math.ceil(len(mutated_pos_list) * self.mutate_prop), 1)
+                mutated_pos_list = mutated_pos_list[:mutated_num]
+                if mutated_num <= 2:
+                    # To avoid no code left error
+                    mutated_op_list = ["switch_outside"] * mutated_num
+                else:
+                    mutated_op_list = random.choices(["switch_inside", "switch_outside", "delete_line"], k=mutated_num)
+                    if set(mutated_op_list) == {"delete_line"}:
+                        mutated_op_list[0] = random.choices(["switch_inside", "switch_outside"], k=1)[0]
+                new_mutated, new_mutated_code_split_pos, labels, contrastive_pair = self._get_mutated_code(index, code, code_split_pos, mutated_pos_list, mutated_op_list)
             else:
-                mutated_op_list = random.choices(["switch_inside", "switch_outside", "delete_line"], k=mutated_num)
-                if set(mutated_op_list) == {"delete_line"}:
-                    mutated_op_list[0] = random.choices(["switch_inside", "switch_outside"], k=1)[0]
-            new_mutated, new_mutated_code_split_pos, labels, contrastive_pair = self._get_mutated_code(index, code, code_split_pos, mutated_pos_list, mutated_op_list)
+                # Mutation mode: universal
+                code = item['output']['code']
+                split_pos = utils.find_all_occurrences(self.split_token, code)
+                #code_split_pos = item['output']['code_split_pos']
+                mutated_pos_list = []
+                split_mapping = dict()
+                previous_pos = 0
+                for idx, pos in enumerate(split_pos):
+                    if code[previous_pos:pos].strip() == "":
+                        previous_pos = pos
+                        split_mapping[idx] = None
+                        continue
+                    else:
+                        mutated_pos_list.append(idx) # record which line should be the candidate to be mutated
+                        split_mapping[idx] = len(mutated_pos_list) - 1
+                        previous_pos = pos
+                code_split_pos_len = len(mutated_pos_list)
+                random.shuffle(mutated_pos_list)
+                mutated_num = max(math.ceil(code_split_pos_len * self.mutate_prop), 1)
+                local_pointer = 0
+                remaining_num = mutated_num
+                new_mutated_info = dict()
+
+                naive_flag = [False, False] # A hacky way to deal with continue and break rules
+                while local_pointer < code_split_pos_len:
+                    # Iteratively mutate the code
+                    # Until mutated_num is reached
+                    candidate_pos_list = mutated_pos_list[local_pointer: local_pointer + remaining_num]
+                    new_info = self.external_mutator._mutate_code(code, candidate_pos_list)
+                    clean_key = list(new_info.keys())
+                    for key in clean_key:
+                        # Here we try to avoid the cases
+                        # where most mutated code lines are only generated
+                        # through continue/break style.
+                        # Refer to https://github.com/agroce/universalmutator/blob/55c68f7377c15f08292cd148e8e46dd029704bec/universalmutator/static/universal.rules#L83
+                        temp = []
+                        for _ in new_info[key][1]:
+                            if "continue" not in new_info[key][0] and "continue" in _:
+                                if naive_flag[0] is False:
+                                    temp.append(_)
+                                    naive_flag[0] = True
+                                else:
+                                    continue
+                            elif "break" not in new_info[key][0] and "break" in _:
+                                if naive_flag[1] is False:
+                                    temp.append(_)
+                                    naive_flag[1] = True
+                                else:
+                                    continue
+                            else:
+                                temp.append(_)
+                        if len(temp) == 0:
+                            new_info.pop(key)
+                        else:
+                            new_info[key][1] = temp
+                    new_mutated_info.update(new_info)
+                    if mutated_num == len(new_mutated_info):
+                        break
+                    remaining_num = mutated_num - len(new_mutated_info)
+                    local_pointer += len(candidate_pos_list)
+
+                    
+                code_in_line = code.split("\n")
+                new_code_in_line = []
+                labels = []
+                #new_split_mapping = []
+                new_mutated_code_split_pos = []
+                contrastive_original = []
+                contrastive_mutated = []
+
+                pos_in_mutated_code = 0
+
+                for idx, line in enumerate(code_in_line):
+                    if idx in new_mutated_info:
+                        # Get the replacement code (handle multiple options)
+                        replacement_options = new_mutated_info[idx][1]
+                        new_code = random.choice(replacement_options)
+                        new_code_lines = new_code.split('\n')  # Split into multiple lines if necessary
+
+                        # Extend the new code lines into the new_code_in_line
+                        new_code_in_line.extend(new_code_lines)
+
+                        # Update labels and split_mapping for the new lines
+                        for inner_idx, _ in enumerate(new_code_lines):
+                            if line == _:
+                                labels.append(self.original_label)
+                            else:
+                                labels.append(self.mutated_label)
+                                # Update contrastive mappings
+                                if split_mapping[idx] is not None:
+                                    contrastive_original.append(split_mapping[idx])
+                                    contrastive_mutated.append(len(labels) - 1)
+                            #new_split_mapping.append(None)  # No direct mapping for new lines
+
+                            # Update the position in the mutated code
+                            pos_in_mutated_code += len(new_code_lines[inner_idx]) + 1  # +1 for '\n'
+                            new_mutated_code_split_pos.append(pos_in_mutated_code - 1)
+
+                    else:
+                        # No mutation; append the original line
+                        new_code_in_line.append(line)
+                        # Update the position in the mutated code
+                        pos_in_mutated_code += len(line) + 1  # +1 for '\n'
+                        # We do not record label and split_pos for empty line
+                        if len(line.strip()) == 0:
+                            continue
+                        labels.append(self.original_label) # if split_mapping[idx] is not None else None)
+                        #new_split_mapping.append(split_mapping[idx])
+
+                        new_mutated_code_split_pos.append(pos_in_mutated_code - 1)
+                new_mutated = "\n".join(new_code_in_line)
+                contrastive_pair = [contrastive_original, contrastive_mutated]
+                mutated_op_list = None
+                
+                
             item["mutated_code"] = {
                 "code": new_mutated,
                 "code_split_pos": new_mutated_code_split_pos,
@@ -276,6 +487,58 @@ class AugPretrainCodedata(PretrainCodedata):
                     token_num += len(item['mutated_code']['code_split_pos'])
         return token_num
 
+    @classmethod
+    def load(cls, path, meta_info_file_name="meta.json"):
+        with open(os.path.join(path, meta_info_file_name), "r") as f:
+            meta_info = json.load(f)
+        this_dataset = cls(
+            meta_info["mutate_prop"],
+            meta_info["dataset_id"],
+            meta_info["feature_key_list"],
+            meta_info["preprocess_all_in_memory"],
+            meta_info["split_token"],
+            meta_info["original_label"],
+            meta_info["mutated_label"],
+            meta_info_file_name=meta_info_file_name,
+            data_file_name=meta_info["data_file_name"],
+            load_from_disk=True
+        )
+        with open(os.path.join(path, meta_info["data_file_name"]), "r") as f:
+            data = json.load(f)
+        
+        this_dataset.processed_data = data["processed_data"]
+        this_dataset.data = datasets.arrow_dataset.Dataset.from_dict(data["data"])
+        return this_dataset
+        
+    
+    def save_to_disk(self, path):
+        if not os.path.exists(path):
+            os.makedirs(path)
+        meta_info_path = os.path.join(path, self.meta_info_file_name)
+        meta_info = {
+            "dataset_id": self.dataset_id,
+            "split_token": self.split_token,
+            "feature_key_list": self.feature_key_list,
+            "preprocess_all_in_memory": self.preprocess_all_in_memory,
+            "mutate_prop": self.mutate_prop,
+            "original_label": self.original_label,
+            "mutated_label": self.mutated_label,
+            "meta_info_file_name": self.meta_info_file_name,
+            "data_file_name": self.data_file_name
+        }
+        with open(meta_info_path, "w") as f:
+            json.dump(meta_info, f)
+        
+        with open(os.path.join(path, self.data_file_name), "w") as f:
+            json.dump(
+                {
+                    "processed_data": self.processed_data,
+                    "data": self.data.to_dict()
+                },
+                f
+            )
+        
+    
 class AugExecCodeData(Dataset):
     def __init__(self, 
                  data_path, 

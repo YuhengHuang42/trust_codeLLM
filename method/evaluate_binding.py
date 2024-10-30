@@ -169,12 +169,6 @@ def main(
         cache_dir = config_dict["system_setting"]["cache_dir"]
     else:
         cache_dir = None
-    # ===== Load Model =====
-    model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
-    if collect_type == "attention":
-        recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
-    elif collect_type == "hidden":
-        recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
     FALLBACK_ARGS["model_name"] = model_name
     FALLBACK_ARGS["parallel"] = parallel
     FALLBACK_ARGS["cache_dir"] = cache_dir
@@ -188,12 +182,26 @@ def main(
         before_dict_save_path = os.path.join(before_dict_save_folder, f"{model_identifier}_{mode}_{collect_type}_extract_code{extract_code}_{dataset_identifier}_before_dict.pt")
         if os.path.exists(before_dict_save_path):
             before_dict = torch.load(before_dict_save_path)
+            tokenizer = utils.load_tokenizer(model_name)
         else:
             before_dict = None
+            # ===== Load Model =====
+            model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
+            if collect_type == "attention":
+                recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
+            elif collect_type == "hidden":
+                recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain")
     else:
         before_dict_save_path = None
         before_dict = None
-    
+
+        # ===== Load Model =====
+        model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
+        if collect_type == "attention":
+            recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
+        elif collect_type == "hidden":
+            recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
+        
     #if task.lower() == "defects4j":
     #    data_path = config_dict["task_config"]["repair_data_path"]
     #    loc_folder = config_dict["task_config"]["repair_loc_folder"]

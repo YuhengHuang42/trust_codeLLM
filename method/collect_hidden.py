@@ -45,6 +45,7 @@ class PretrainCodedata(Dataset):
                  feature_key_list: list=["java", "python", "c++", "javascript"],
                  preprocess_all_in_memory=False,
                  split_token="\n",
+                 load_from_disk=False,
                  ):
         """
         
@@ -56,15 +57,17 @@ class PretrainCodedata(Dataset):
         """
         # datasets.arrow_dataset.Dataset
         self.dataset_id = dataset_id
-        self.data = datasets.load_dataset(dataset_id)["train"]
-        if dataset_id == "greengerong/leetcode":
-            self.data = remove_item_from_dataset(self.data, 1715) # Remove the corrupted data
+        self.load_from_disk = load_from_disk
         self.processed_data = None
         self.feature_key_list = feature_key_list
         self.preprocess_all_in_memory = preprocess_all_in_memory
         self.split_token = split_token
-        if self.preprocess_all_in_memory:
-            self._preprocess_data()
+        if not self.load_from_disk:
+            self.data = datasets.load_dataset(dataset_id)["train"]
+            if dataset_id == "greengerong/leetcode":
+                self.data = remove_item_from_dataset(self.data, 1715) # Remove the corrupted data
+            if self.preprocess_all_in_memory:
+                self._preprocess_data()
         
     
     

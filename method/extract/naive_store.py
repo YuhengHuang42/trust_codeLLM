@@ -301,7 +301,10 @@ class VariedKeyTensorStore(Dataset):
                     original_this_batch_shift = 0
                 if next_token_pred and not item["original"]["last_in"]:
                     # Enable next_token prediction and the last token is not included
-                    last_hidden = item["last_hidden"].reshape(1, neuron_num)
+                    try:
+                        last_hidden = item['original']["last_hidden"].reshape(1, neuron_num)
+                    except:
+                        print(item)
                     original_hidden = torch.cat([original_hidden, last_hidden], dim=0)
                 #original.append(original_hidden)
                 original_next_pair[0].append(original_hidden[:-1]) # Next-token prediction
@@ -320,14 +323,26 @@ class VariedKeyTensorStore(Dataset):
                         mutated_hidden = torch.cat([mutated_hidden, last_hidden], dim=0)
                     contrastive_list_original = item["mutated_code"][key]["contrastive_list_original"]
                     contrastive_list_mutated = item["mutated_code"][key]["contrastive_list_mutated"]
-                    if (contrastive_list_original[-1] + original_this_batch_shift) == original_length - 1:
-                        contrastive_list_original = contrastive_list_original[:-1] # For Input we have already remove the last hidden states, so pop it.
-                        contrastive_list_mutated = contrastive_list_mutated[:-1] # Since original is alread poped, we need to pop the mutated one as well.
-                    elif (contrastive_list_mutated[-1] + mutated_this_batch_shift) ==  mutated_hidden.shape[0] - 1:
-                        contrastive_list_original = contrastive_list_original[:-1]
-                        contrastive_list_mutated = contrastive_list_original[:-1]
+                    # Loop to repetitively check and remove elements from both lists
+                    while (
+                        (len(contrastive_list_original) > 0 and 
+                        (contrastive_list_original[-1] + original_this_batch_shift == original_length - 1)) or
+                        (len(contrastive_list_mutated) > 0 and 
+                        (contrastive_list_mutated[-1] + mutated_this_batch_shift == mutated_hidden.shape[0] - 1))
+                    ):
+                        # Check if the condition is true for the original list
+                        if (contrastive_list_original[-1] + original_this_batch_shift) == original_length - 1:
+                            contrastive_list_original = contrastive_list_original[:-1]  # Pop last element
+                            contrastive_list_mutated = contrastive_list_mutated[:-1]  # Pop corresponding element from mutated list
+
+                        # Check if the condition is true for the mutated list
+                        elif (contrastive_list_mutated[-1] + mutated_this_batch_shift) == mutated_hidden.shape[0] - 1:
+                            contrastive_list_original = contrastive_list_original[:-1]  # Pop last element from original list
+                            contrastive_list_mutated = contrastive_list_mutated[:-1]  # Pop corresponding element from mutated list
+                    
                     original_index.append(original_this_batch_shift + original_shift_pointer + contrastive_list_original)
                     mutated_index.append(mutated_this_batch_shift + mutated_shift_pointer + contrastive_list_mutated)
+                    #print(mutated_index)
                     #mutated.append(mutated_hidden)
                     mutated_next_pair[0].append(mutated_hidden[:-1])
                     mutated_next_pair[1].append(mutated_hidden[1:])

@@ -148,8 +148,8 @@ def training_one_epoch_contrastive(sae,
             if next_token_pred is False:
                 original_feed = original.to(sae.device)
                 mutated_feed = mutated.to(sae.device)
-                original_target = original
-                mutated_target = mutated
+                original_target = original_feed
+                mutated_target = mutated_feed
             else:
                 original_feed = original[0].to(sae.device)
                 mutated_feed = mutated[0].to(sae.device)
@@ -223,19 +223,31 @@ def training_one_epoch_contrastive(sae,
                 )
     return sae, loss_list
 
-def evaluate_contrastive(sae, data_loader_list, loss_fn):
+def evaluate_contrastive(sae, data_loader_list, loss_fn, next_token_pred=False):
     sae.eval()
     loss_list = list()
     for data_loader in data_loader_list:
         for idx, store_batch in (enumerate(data_loader)):
             with torch.inference_mode():
                 original, mutated, original_index, mutated_index, ori_div_list = store_batch
-                original = original.to(sae.device)
-                ori_latents_pre_act, ori_latents, ori_recons = sae(original)
-                mutated = mutated.to(sae.device)
-                mut_latents_pre_act, mut_latents, mut_recons = sae(mutated)
-                
-                total_loss = loss_fn(ori_recons, original) + loss_fn(mut_recons, mutated)
+                if next_token_pred is False:
+                    original_feed = original.to(sae.device)
+                    mutated_feed = mutated.to(sae.device)
+                    original_target = original_feed
+                    mutated_target = mutated_feed
+                else:
+                    original_feed = original[0].to(sae.device)
+                    mutated_feed = mutated[0].to(sae.device)
+                    original_target = original[1].to(sae.device)
+                    mutated_target = mutated[1].to(sae.device)
+                #original = original.to(sae.device)
+                ori_latents_pre_act, ori_latents, ori_recons = sae(original_feed)
+                #mutated = mutated.to(sae.device)
+                mut_latents_pre_act, mut_latents, mut_recons = sae(mutated_feed)
+                if sae.dataset_level_norm:
+                    original_target = original_target - sae.data_mean
+                    mutated_target = mutated_target - sae.data_mean
+                total_loss = loss_fn(ori_recons, original_target) + loss_fn(mut_recons, mutated_target)
                 cur_loss = total_loss.detach().cpu().item()
                 loss_list.append(cur_loss)
     return np.average(loss_list)
@@ -331,7 +343,7 @@ def main(
     #data_loader =  DataLoader(store, batch_size=batch_size, collate_fn=get_collate_fn(feature_name), shuffle=True)
     data_loader_list = []
     for store in store_list:
-        data_loader_list.append(store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor))
+        data_loader_list.append(store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor, next_token_pred=next_token_pred))
     #data_loader = store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor)
     if dataset_level_norm:
         logger.info("Enable dataset level normalization")
@@ -409,7 +421,7 @@ def main(
     if contrastive_loss_fn is None:
         eval_loss = evaluate(sae, data_loader_list, loss_fn)
     else:
-        eval_loss = evaluate_contrastive(sae, data_loader_list, loss_fn)
+        eval_loss = evaluate_contrastive(sae, data_loader_list, loss_fn, next_token_pred=next_token_pred)
     if wandb_info is not None:
         wandb.log({
             "Eval loss": eval_loss,
