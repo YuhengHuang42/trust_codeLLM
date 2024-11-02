@@ -279,6 +279,7 @@ def main(
         config_dict = yaml.safe_load(file)
     hidden_neuron = config_dict["task_config"]["hidden_neuron"]
     storage_paths = config_dict['task_config']["storage_paths"]
+    additional_storage_paths = config_dict['task_config'].get("additional_storage_paths", None)
     sae_hidden = config_dict["task_config"]["sae_hidden"]
     topk = config_dict["task_config"]["topk"]
     normalize = config_dict["task_config"]["normalize"]
@@ -338,12 +339,25 @@ def main(
         for path in storage_paths:
             store_list.append(VariedKeyTensorStore.load_from_disk(path, open_mode="r"))
         #store = VariedKeyTensorStore.load_from_disk(storage_path, open_mode="r")
-        
+    
+    additional_storage_list = []
+    if additional_storage_paths is not None:
+        if store_type == "naive":
+            for path in additional_storage_paths:
+                additional_storage_list.append(NaiveTensorStore.load_from_disk(path))
+            #store = NaiveTensorStore.load_from_disk(storage_path)
+        else:
+            for path in additional_storage_paths:
+                additional_storage_list.append(VariedKeyTensorStore.load_from_disk(path, open_mode="r"))
+    
     logger.info("Storage Ready")
     #data_loader =  DataLoader(store, batch_size=batch_size, collate_fn=get_collate_fn(feature_name), shuffle=True)
     data_loader_list = []
     for store in store_list:
         data_loader_list.append(store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor, next_token_pred=next_token_pred))
+    additional_loader_list = []
+    for store in additional_storage_list:
+        additional_loader_list.append(store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor, next_token_pred=next_token_pred))
     #data_loader = store.get_data_loader(batch_size, feature_name, shuffle=True, num_workers=num_workers, prefetch_factor=prefetch_factor)
     if dataset_level_norm:
         logger.info("Enable dataset level normalization")
@@ -351,7 +365,7 @@ def main(
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, sae.parameters()), lr=learning_rate,  eps=eps)
     #optimizer = torch.optim.AdamW(sae.parameters(), lr=learning_rate,  eps=eps)
     if scheduler_type == "cos":
-        training_step = sum([len(i) for i in data_loader_list]) * epoch_num
+        training_step = sum([len(i) for i in data_loader_list]) * cold_start_epoch + sum([len(i) for i in data_loader_list] + [len(i) for i in additional_loader_list]) * (epoch_num - cold_start_epoch)
         warmup_step = math.floor(training_step * 0.1) # Hard-code. TODO: Improve this. 
         scheduler = transformers.get_cosine_schedule_with_warmup(optimizer=optimizer, 
                                                                 num_warmup_steps=warmup_step,
@@ -387,11 +401,13 @@ def main(
         else:
             if cold_start_epoch > epoch:
                 c_loss_fn = None
+                input_data_loader_list = data_loader_list
             else:
                 c_loss_fn = contrastive_loss_fn
+                input_data_loader_list = data_loader_list + additional_loader_list
                 logger.info("Enable contrastive loss based training")
             sae, loss_list = training_one_epoch_contrastive(sae,
-                                                            data_loader_list,
+                                                            input_data_loader_list,
                                                             optimizer,
                                                             recon_loss_fn=loss_fn,
                                                             contrastive_loss_fn=c_loss_fn,

@@ -480,11 +480,21 @@ def contrastive_loss(original: torch.Tensor,
                      model, 
                      norm=True, 
                      margin=2.0):
+    num = original.shape[0]
     if norm == True:
         original = original / torch.norm(original, p=2)
         mutated = mutated / torch.norm(mutated, p=2)
-    loss = max(0, margin - torch.dist(original, mutated))
+    loss = max(0, margin - torch.dist(original, mutated)) / num
     return loss
+
+def contrastive_loss_softmax(
+    original: torch.Tensor,
+    mutated: torch.Tensor,
+    ori_index: torch.Tensor,
+    mut_index: torch.Tensor,
+):
+    s_pos = 0
+    s_neg = 0
 
 def CCS_loss(
     original: torch.Tensor,

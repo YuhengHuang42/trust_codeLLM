@@ -46,7 +46,24 @@ def compute_hit(important_tokens: list, selected_tokens: list):
         gt += item
     gt = set(gt)
     selected = set(selected_tokens)
-    return len(selected.intersection(gt)) / len(gt) 
+    return len(selected.intersection(gt)) / len(gt)
+
+def compute_recall(important_tokens: list, selected_tokens: list):
+    """
+    Compute recall rate given the ground truth tokens and selected tokens.
+    ---
+    Args:
+        important_tokens: List[List]. important_token_info[key] returned by utils.get_important_token_pos
+        selected_tokens: List
+    Return:
+        Recall rate
+    """
+    gt = []
+    for item in important_tokens:
+        gt += item
+    gt = set(gt)
+    selected = set(selected_tokens)
+    return len(selected.intersection(gt)) / len(selected)
 
 def evaluate_binding(data, 
                  key_list, 
@@ -175,7 +192,7 @@ def main(
 
     # ===== Load Data =====
     data = utils.load_shelve(data_path)
-    
+    recorder = None
     if before_dict_save_folder is not None:
         dataset_identifier = os.path.basename(data_path).split(".")[0]
         model_identifier = model_name.split("/")[-1]
@@ -282,7 +299,7 @@ def main(
             logger.error("OOM error still exists after fallback inference. Ignore them.")
             logger.error("OOM keys: {}".format(oom_keys))
     
-    topk_recorder = {"top5": score / counter}
+    #topk_recorder = {"top5": score / counter}
     result = {**first_result, **second_result}
     if before_dict is None and before_dict_save_path is not None:
         before_dict = {**before_dict_1, **before_dict_2}
@@ -292,9 +309,10 @@ def main(
         del before_dict_2
     
     
-    
-    for topk_iter in [1, 3, 10]:
-        score = 0
+    topk_recorder = {"hit_rate": {}, "recall": {}}
+    for topk_iter in [1, 3, 5, 10]:
+        hit_score = 0
+        recall_score = 0
         counter = 0
         for key in result:
             pred_result = result[key]
@@ -308,10 +326,12 @@ def main(
             for line in rank_per_line:
                 selected_token = selected_token.union(set(candidate_tokens[line[1]]))
             
-            topk_score = compute_hit(important_token_info[key], selected_token)
-            score += topk_score
+            hit_score += compute_hit(important_token_info[key], selected_token)
+            recall_score += compute_recall(important_token_info[key], selected_token)
+            
             counter += 1
-        topk_recorder["top{}".format(topk_iter)] = score / counter
+        topk_recorder['hit_rate']["top{}".format(topk_iter)] = hit_score / counter
+        topk_recorder['recall']["top{}".format(topk_iter)] = recall_score / counter
     
     for key in result:
         result[key] = result[key].tolist()
