@@ -79,6 +79,10 @@ class PretrainCodedata(Dataset):
             return_dict['context'] = item["query"]
         elif self.dataset_id == "ise-uiuc/Magicoder-OSS-Instruct-75K":
             return_dict['context'] = item["problem"]
+        if "id" in item:
+            return_id = item["id"]
+        else:
+            return_id = None
         for key in self.feature_key_list:
             codes, code_pos_infos = utils.extract_code_block(item[key])
             if len(codes) < 1:
@@ -118,7 +122,10 @@ class PretrainCodedata(Dataset):
                 continue
             return_list.append(
                 {"context": return_dict["context"], 
-                 "output": return_dict["output"][key]}
+                 "output": return_dict["output"][key],
+                 "language": key,
+                 "return_id": return_id
+                 }
             )
         return return_list
     
@@ -137,7 +144,7 @@ class PretrainCodedata(Dataset):
             item = self.processed_data[index]
         else:
             item = self.data[index]
-            item = self._preprocess_data(item)
+            item = self._preprocess_data_single(item)
         return item
 
     def __len__(self):

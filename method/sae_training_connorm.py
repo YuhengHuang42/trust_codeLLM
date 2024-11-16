@@ -25,84 +25,6 @@ def compute_grad_norm(model):
     total_grad_norm = total_grad_norm ** 0.5  # Take the square root to get the total L2 norm
     return total_grad_norm
 
-def training_one_epoch(sae, 
-                       data_loader_list, 
-                       optimizer, 
-                       loss_fn, 
-                       epoch,
-                       path, 
-                       print_freq_prop=0.2, 
-                       scheduler=None, 
-                       wandb_handle=None, 
-                       clip_grad=False):
-    sae.train()
-    loss_list = list()
-    local_step_num = sum([len(i) for i in data_loader_list])
-    cum_time = 0
-    print_freq = round(local_step_num * print_freq_prop)
-    for data_loader in data_loader_list:
-        for idx, store_batch in enumerate(data_loader):
-            start_time = time.time()
-            optimizer.zero_grad()
-            batch_x = store_batch[0]
-            batch_y = store_batch[1]
-            # Filter out rows in x where the corresponding y is 0
-            batch_x = batch_x[batch_y != 0].to(sae.device)
-            latents_pre_act, latents, recons = sae(batch_x)
-            total_loss = loss_fn(recons, batch_x)
-            total_loss.backward()
-            if clip_grad:
-                pre_norm = compute_grad_norm(sae)
-                #torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, sae.parameters()), 0.1)
-                try:
-                    torch.nn.utils.clip_grad_norm_(sae.parameters(), 1, error_if_nonfinite=True)
-                except:
-                    bug_save_path = os.path.join(path, f"error_epoch_{epoch}.pt")
-                    logger.error(f"Error at epoch {epoch} idx {idx}")
-                    logger.error("Saving to {}".format(bug_save_path))
-                    torch.save(
-                                    {'iter': epoch,
-                                    "loss_list": loss_list,
-                                    'model_state_dict': sae.state_dict(),
-                                    'optimizer_state_dict': optimizer.state_dict(),
-                                    "batch_x": batch_x.detach().to("cpu")
-                                    }, 
-                                    bug_save_path
-                    )
-                    raise Exception
-                #after_norm = compute_grad_norm(sae)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-                lr = float(scheduler.get_last_lr()[0])
-            else:
-                lr = optimizer.param_groups[0]['lr']
-            cur_loss = total_loss.detach().cpu().item()
-            loss_list.append(cur_loss)
-            #l2_norm = 0
-            #for param in sae.parameters():
-            #    l2_norm += torch.norm(param, p=2)  # L2 norm for each parameter
-            if wandb_handle is not None:
-                            wandb.log({
-                                "epoch": epoch,
-                                "Loss": loss_list[-1],
-                                "LR": lr,
-                                #"L2_model_params": l2_norm,
-                                "grad_before_norm": pre_norm,
-                                #"recons_norm": torch.norm(recons, p=2),
-                                #"batch_x_norm": torch.norm(batch_x, p=2),
-                            })
-            end_time = time.time()
-            cum_time += end_time - start_time
-            if idx % print_freq == 0:
-                batch_time = cum_time / idx if idx > 0 else cum_time
-                cur_loss = np.average(loss_list)
-                logger.info(
-                    f'Epoch: [{epoch}][{idx}/{local_step_num}]\t'
-                    f'Batch Time: {batch_time}\t'
-                    f'Loss: {cur_loss}'
-                )
-    return sae, loss_list
 
 def evaluate(sae, data_loader_list, loss_fn):
     sae.eval()
@@ -143,6 +65,8 @@ def training_one_epoch_contrastive(sae,
     for data_loader in data_loader_list:
         for idx, store_batch in enumerate(data_loader):
             original, mutated, original_index, mutated_index, additional_info = store_batch
+            original = original.float()
+            mutated = mutated.float()
             start_time = time.time()
             optimizer.zero_grad()
             if next_token_pred is False:
@@ -155,24 +79,18 @@ def training_one_epoch_contrastive(sae,
                 mutated_feed = mutated[0].to(sae.device)
                 original_target = original[1].to(sae.device)
                 mutated_target = mutated[1].to(sae.device)
-            ori_latents_pre_act, ori_latents, ori_recons = sae(original_feed)
-            mut_latents_pre_act, mut_latents, mut_recons = sae(mutated_feed)
+                
+            original_target = original_target[original_index] - (original_target[original_index] + mutated_target[mutated_index]) / 2
+            zero_rows = torch.all(original_target <= 1e-5, dim=1)  # Check for rows where all elements are zero
+            original_target = original_target[~zero_rows]
+            
+            ori_latents_pre_act, ori_latents, ori_recons = sae(original_feed[original_index][~zero_rows])
+            #mut_latents_pre_act, mut_latents, mut_recons = sae(mutated_feed)
             if sae.dataset_level_norm:
                 original_target = original_target - sae.data_mean
                 mutated_target = mutated_target - sae.data_mean
-            recon_loss = recon_loss_fn(ori_recons, original_target) + recon_loss_fn(mut_recons, mutated_target)
-            if contrastive_loss_fn is None:
-                total_loss = recon_loss
-            else:
-                diff = original_feed[original_index] - mutated_feed[mutated_index]
-                zero_rows = torch.all(diff <= 1e-4, dim=1)  # Check for rows where all elements are zero
-                
-                total_loss = recon_loss + contrastive_loss_fn(ori_latents[original_index][~zero_rows], mut_latents[mutated_index][~zero_rows], sae)
-                #final_pair = ori_latents[ori_div_list]
-                #self_contrastive = final_pair / final_pair.norm(dim=-1, keepdim=True)
-                #upper_triangular = torch.triu(torch.cdist(self_contrastive, self_contrastive), diagonal=1)
-                #total_loss += upper_triangular[upper_triangular > 0].mean()
-            total_loss.backward()
+            recon_loss = recon_loss_fn(ori_recons, original_target)
+            recon_loss.backward()
             if clip_grad:
                 pre_norm = compute_grad_norm(sae)
                 #torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, sae.parameters()), 0.1)
@@ -199,7 +117,7 @@ def training_one_epoch_contrastive(sae,
                 lr = float(scheduler.get_last_lr()[0])
             else:
                 lr = optimizer.param_groups[0]['lr']
-            cur_loss = total_loss.detach().cpu().item()
+            cur_loss = recon_loss.detach().cpu().item()
             loss_list.append(cur_loss)
             #l2_norm = 0
             #for param in sae.parameters():
@@ -243,14 +161,13 @@ def evaluate_contrastive(sae, data_loader_list, loss_fn, next_token_pred=False):
                     mutated_feed = mutated[0].to(sae.device)
                     original_target = original[1].to(sae.device)
                     mutated_target = mutated[1].to(sae.device)
-                #original = original.to(sae.device)
-                ori_latents_pre_act, ori_latents, ori_recons = sae(original_feed)
-                #mutated = mutated.to(sae.device)
-                mut_latents_pre_act, mut_latents, mut_recons = sae(mutated_feed)
+                ori_latents_pre_act, ori_latents, ori_recons = sae(original_feed[original_index])
+                #mut_latents_pre_act, mut_latents, mut_recons = sae(mutated_feed)
+                original_target = original_target[original_index] - (original_target[original_index] + mutated_target[mutated_index]) / 2
                 if sae.dataset_level_norm:
                     original_target = original_target - sae.data_mean
                     mutated_target = mutated_target - sae.data_mean
-                total_loss = loss_fn(ori_recons, original_target) + loss_fn(mut_recons, mutated_target)
+                total_loss = loss_fn(ori_recons, original_target)# + loss_fn(mut_recons, mutated_target)
                 cur_loss = total_loss.detach().cpu().item()
                 loss_list.append(cur_loss)
     return np.average(loss_list)
@@ -393,39 +310,20 @@ def main(
             contrastive_loss_fn = contrastive_pred_loss
     all_loss_list = []
     for epoch in range(epoch_num):
-        if contrastive_loss_fn is None:
-            sae, loss_list = training_one_epoch(sae, 
-                                                data_loader_list, 
-                                                optimizer, 
-                                                loss_fn, 
-                                                epoch,
-                                                path=result_output_path,
-                                                print_freq_prop=print_freq_prop, 
-                                                scheduler=scheduler, 
-                                                wandb_handle=wandbrun,
-                                                clip_grad=clip_grad
-                                            )
-        else:
-            if cold_start_epoch > epoch:
-                c_loss_fn = None
-                input_data_loader_list = data_loader_list
-            else:
-                c_loss_fn = contrastive_loss_fn
-                input_data_loader_list = data_loader_list + additional_loader_list
-                logger.info("Enable contrastive loss based training")
-            sae, loss_list = training_one_epoch_contrastive(sae,
-                                                            input_data_loader_list,
-                                                            optimizer,
-                                                            recon_loss_fn=loss_fn,
-                                                            contrastive_loss_fn=c_loss_fn,
-                                                            epoch=epoch,
-                                                            path=result_output_path,
-                                                            print_freq_prop=print_freq_prop,
-                                                            scheduler=scheduler,
-                                                            wandb_handle=wandbrun,
-                                                            clip_grad=clip_grad,
-                                                            next_token_pred=next_token_pred
-                                                            )
+        input_data_loader_list = data_loader_list + additional_loader_list
+        sae, loss_list = training_one_epoch_contrastive(sae,
+                                                        input_data_loader_list,
+                                                        optimizer,
+                                                        recon_loss_fn=loss_fn,
+                                                        contrastive_loss_fn=None,
+                                                        epoch=epoch,
+                                                        path=result_output_path,
+                                                        print_freq_prop=print_freq_prop,
+                                                        scheduler=scheduler,
+                                                        wandb_handle=wandbrun,
+                                                        clip_grad=clip_grad,
+                                                        next_token_pred=next_token_pred
+                                                        )
         all_loss_list += loss_list
         if epoch % model_save_freq == 0 or epoch == epoch_num - 1:
              torch.save(
@@ -441,10 +339,8 @@ def main(
              sae = sae.to(device)
         logger.info(f'Epoch: [{epoch}] Finished. Loss: {np.average(loss_list)}\t')
 
-    if contrastive_loss_fn is None:
-        eval_loss = evaluate(sae, data_loader_list, loss_fn)
-    else:
-        eval_loss = evaluate_contrastive(sae, data_loader_list, loss_fn, next_token_pred=next_token_pred)
+
+    eval_loss = evaluate_contrastive(sae, data_loader_list, loss_fn, next_token_pred=next_token_pred)
     if wandb_info is not None:
         wandb.log({
             "Eval loss": eval_loss,
@@ -457,3 +353,4 @@ def main(
 if __name__ == "__main__":
     typer.run(main)
     
+

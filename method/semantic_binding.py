@@ -27,6 +27,7 @@ import utility.utils as utils
 import method.sae_model as sae_model
 from task import dataset_utils
 from task import safim
+import method.detect_model as detect_model
 from method.detect_model import LBLRegression, EncoderClassifier, collect_attention_map, collect_hidden_states, flat_data_dict
 from method.extract import extract_util
 
@@ -218,7 +219,9 @@ def main(
     data_source = config_dict["task_config"].get("data_source", ["shelve"])
     important_label_path_list = config_dict["task_config"].get("important_label_path_list", [None])
     data_path_list = config_dict["task_config"]['data_path_list']
+    vector_norm = config_dict["task_config"].get("vector_norm", False)
     model_type = config_dict["task_config"].get("model_type", "mlp")
+    external_proj_path = config_dict["task_config"].get("external_proj_path", None)
     logger.info(f"Using Model Type: {model_type}")
     #assert data_source in ["shelve", "tracer"]
     assert collect_type in ["attention", "hidden"]
@@ -235,6 +238,11 @@ def main(
     else:
         encoder = None
 
+    if external_proj_path is not None:
+        external_proj = detect_model.SupervisedPrjection.load(external_proj_path)
+        logger.info(f"Load external projection from {external_proj_path}")
+    else:
+        external_proj = None
     tokenizer = utils.load_tokenizer(model_name)
     data_line_token_pair = [[], [], []]
     for idx, source in enumerate(data_source):
@@ -402,7 +410,7 @@ def main(
         clf.fit(train_x, train_y, model_type, fit_model_param, layer)
     elif mode == "sae" or mode == "internal_only":
         clf = EncoderClassifier()
-        clf.fit(train_x, train_y, model_type, fit_model_param, encoder)
+        clf.fit(train_x, train_y, model_type, fit_model_param, encoder, vector_norm=vector_norm, external_proj=external_proj)
     clf.save(model_save_path)
     accuracy, pred_profiler = clf.evaluate(train_x, train_y)
     logger.info(f"Accuracy on training data: {accuracy}")

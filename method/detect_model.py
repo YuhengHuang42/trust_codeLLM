@@ -11,8 +11,10 @@ from imblearn.over_sampling import SMOTE
 from torch.nn.utils.rnn import pad_sequence
 from loguru import logger
 from torch.utils.data import Dataset
+import sispca
 
 from method.sae_model import Autoencoder
+# from sparse_autoencoder import LN
 
 def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, numeric_stability=1e-7):
     """
@@ -88,6 +90,108 @@ def convert_to_torch_tensor(array):
         return array
     else:
         raise TypeError("Input must be a NumPy array or a PyTorch tensor.")
+
+class SupervisedPrjection():
+    def __init__(self):
+        self.projection_matrix = None
+        self.latent_info = None
+        self.key_order = None
+        self.n_latent_sub = None
+        self.mean = None
+        self.std = None
+        self.vector_norm = None
+    
+    def fit_projector(self, 
+                      supervised_x, 
+                      latent_info,
+                      key_order, 
+                      batch_size=2048,
+                      max_epochs=500, 
+                      early_stopping_patience=5,
+                      vector_norm=True):
+        """
+        latent_info: dict. key -> [target_type, label, latent_subspace]
+            target_type: str. "continuous" or "categorial"
+        """
+        self.vector_norm = vector_norm
+        if vector_norm:
+            supervised_x = self.norm_x(supervised_x)
+        sdata = sispca.SISPCADataset(
+            data = supervised_x, # (n_sample, n_feature)
+            target_supervision_list = [
+                sispca.Supervision(target_data=latent_info[key][1], target_type=latent_info[key][0])
+                for key in key_order
+            ]
+        )
+        n_latent_sub = [latent_info[key][2] for key in key_order]
+        sispca_model = sispca.SISPCA(
+            sdata, 
+            n_latent_sub=n_latent_sub,
+            lambda_contrast=10,
+            kernel_subspace='linear',
+            solver='eig'
+        )
+        sispca_model.fit(batch_size = batch_size, 
+                         max_epochs = max_epochs, 
+                         early_stopping_patience = early_stopping_patience, 
+                         accelerator="auto"
+                         )
+        
+        self.projection_matrix = sispca_model.U
+        self.latent_info = latent_info
+        self.key_order = key_order
+        self.n_latent_sub = n_latent_sub
+        self.mean = sispca_model._dataset.mean
+        self.std = sispca_model._dataset.std
+        del sispca_model
+    
+    def forward(self, x, feature_idx=0, topk=None, norm=True):
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        # https://github.com/JiayuSuPKU/sispca/blob/539dae1c9cc02b6e575c8c9157926665d7504e3f/sispca/data.py#L96
+        if self.vector_norm and norm == True:
+            # Enable norm in training
+            # and do not explicitly disable it in prediction
+            x = self.norm_x(x)
+        if self.mean is not None:
+            x = x - self.mean
+        if self.std is not None:
+            x = x / self.std
+        #x = sispca.utils.normalize_col(x, center=True, scale=False)
+        proj = self.projection_matrix[:, :self.n_latent_sub[feature_idx]]
+        if topk is not None:
+            proj = proj[:, :topk]
+        return x @ proj # We Assume the first latent subspace is the most important one
+
+    def norm_x(self, vector_data):
+        return vector_data / np.linalg.norm(vector_data, axis=1, keepdims=True)
+    
+    def save(self, path):
+        torch.save({
+            "projection_matrix": self.projection_matrix,
+            "latent_info": self.latent_info,
+            "key_order": self.key_order,
+            "n_latent_sub": self.n_latent_sub,
+            "mean": self.mean,
+            "std": self.std,
+            "vector_norm": self.vector_norm
+            }, 
+            path
+        )
+    
+    @classmethod
+    def load(cls, path):
+        loaded_info = torch.load(path)
+        model = cls()
+        model.projection_matrix = loaded_info["projection_matrix"]
+        model.latent_info = loaded_info["latent_info"]
+        model.key_order = loaded_info["key_order"]
+        model.n_latent_sub = loaded_info["n_latent_sub"]
+        model.mean = loaded_info["mean"]
+        model.std = loaded_info["std"]
+        model.vector_norm = loaded_info["vector_norm"]
+        return model
+        
         
 class EncoderClassifier():
     def __init__(self):
@@ -95,21 +199,36 @@ class EncoderClassifier():
         self.clf = None
         self.model_type = None
         self.cache = None
+        self.vector_norm = None
+        self.external_dim_red_flag = False
+        self.dim_red = None
         
     def fit(self, 
             train_x, 
             train_y, 
             model_type, 
             fit_model_param,
-            encoder, 
+            encoder,
+            vector_norm=False,
+            external_proj=None 
             ):
         self.fit_model_param = fit_model_param
-        self.dim_red = None
+        self.vector_norm = vector_norm
+        already_norm = False
+        if vector_norm is True:
+            train_x = train_x / np.linalg.norm(train_x, axis=1, keepdims=True)
+            already_norm = True
         if "dimension_reduction" in self.fit_model_param:
             dim_red_param = self.fit_model_param.pop("dimension_reduction")
             if "svd" in dim_red_param:
                 self.dim_red = TruncatedSVD(**dim_red_param["svd"])
                 train_x = self.dim_red.fit_transform(train_x)
+        if external_proj is not None:
+            self.dim_red = external_proj
+            self.external_dim_red_flag = True
+            train_x = self.dim_red.forward(train_x, norm=not already_norm).numpy()
+            #train_x = self.dim_red.fit_transform(train_x, norm=not already_norm)
+                
         if "balanced" in self.fit_model_param:
             balanced = self.fit_model_param.pop("balanced")
             if balanced:
@@ -144,7 +263,9 @@ class EncoderClassifier():
                      "model_type": self.model_type,
                      "device": encoder_device,
                      "encoder": encoder_state_dict,
-                     "sorting_code": self.sorting_code
+                     "sorting_code": self.sorting_code,
+                     "vector_norm": self.vector_norm,
+                     "external_dim_red_flag": self.external_dim_red_flag
                      }, 
                     path
                     )
@@ -164,6 +285,9 @@ class EncoderClassifier():
             model.encoder = encoder.to(device)
         else:
             model.encoder = None
+        model.vector_norm = loaded_info.get("vector_norm", False)
+            
+        model.external_dim_red_flag = loaded_info.get("external_dim_red_flag", False)
         #model.encoder = encoder.to(device)
         return model
 
@@ -172,15 +296,28 @@ class EncoderClassifier():
             self.encoder = self.encoder.to(device)
         return self
     
-    def predict(self, layer_info=None, input_token_length=None, candidate_tokens=None, x=None):
+    def predict(self, 
+                layer_info=None, 
+                input_token_length=None, 
+                candidate_tokens=None, 
+                x=None):
         assert (layer_info is not None or x is not None), "Either layer_info or before_enc should be provided."
         latent, before_enc = collect_hidden_states(layer_info, input_token_length, candidate_tokens, self.encoder, before_enc=x)
         latent = latent.numpy().astype(np.float32)
         self.cache = before_enc.numpy().astype(np.float32)
-        if self.dim_red is not None:
-            latent = self.dim_red.transform(latent)
         if self.sorting_code:
             latent = obtain_sorted_code(latent, self.encoder.activation.k)
+        
+        already_norm = False
+        if self.vector_norm is True:
+            already_norm = True
+            latent = latent / np.linalg.norm(latent, axis=1, keepdims=True)
+            
+        if self.dim_red is not None:
+            if self.external_dim_red_flag == True:
+                latent = self.dim_red.forward(latent, norm=not already_norm).numpy()
+            else:
+                latent = self.dim_red.transform(latent)
         y = self.clf.predict_proba(latent)
         return y
     
@@ -203,6 +340,13 @@ class EncoderClassifier():
                 item = item.reshape(1, -1)
                 if self.sorting_code:
                     item = obtain_sorted_code(item, self.encoder.activation.k)
+                if self.vector_norm:
+                    item = item / np.linalg.norm(item, axis=1, keepdims=True)
+                if self.dim_red is not None:
+                    if self.external_dim_red_flag == True:
+                        item = self.dim_red.forward(item, norm = not self.vector_norm).numpy()
+                    else:
+                        item = self.dim_red.transform(item)
                 pred = self.clf.predict_proba(item)
                 pred_result = pred[:, 1]
                 pred_profiler.append(pred_result)
@@ -215,6 +359,13 @@ class EncoderClassifier():
                 item = x[key].reshape(1, -1)
                 if self.sorting_code:
                     item = obtain_sorted_code(item, self.encoder.activation.k)
+                if self.vector_norm:
+                    item = item / np.linalg.norm(item, axis=1, keepdims=True)
+                if self.dim_red is not None:
+                    if self.external_dim_red_flag == True:
+                        item = self.dim_red.forward(item, norm = not self.vector_norm).numpy()
+                    else:
+                        item = self.dim_red.transform(item)
                 pred = self.clf.predict_proba(item)
                 pred_result = pred[:, 1]
                 pred_profiler.append(pred_result)

@@ -506,7 +506,22 @@ def CCS_loss(
     l_consis = (mutated_proj - (1 - original_proj))**2
     l_conf =   torch.min(original_proj, mutated_proj)**2
     return (l_consis.mean() + l_conf.mean()) / 2
-    
+
+
+def contrastive_pred_loss(
+    original: torch.Tensor,
+    mutated: torch.Tensor,
+    model: Autoencoder,
+):
+    original_proj = model.projection_forward(original)
+    mutated_proj = model.projection_forward(mutated)
+    x1 = torch.nn.functional.sigmoid(original_proj)
+    y1 = torch.zeros_like(x1)
+    x2 = torch.nn.functional.sigmoid(mutated_proj)
+    y2 = torch.zeros_like(x2)
+    loss_1 = torch.nn.functional.binary_cross_entropy(x1, y1)
+    loss_2 = torch.nn.functional.binary_cross_entropy(x2, y2)
+    return loss_1 + loss_2
 
 def normalized_L1_loss(
     latent_activations: torch.Tensor,
@@ -518,3 +533,134 @@ def normalized_L1_loss(
     :return: normalized L1 loss (shape: [1])
     """
     return (latent_activations.abs().sum(dim=1) / original_input.norm(dim=1)).mean()
+
+class NaiveAutoEncoder(nn.Module):
+    def __init__(self, 
+                 n_latents: int,
+                 n_inputs: int,
+                 layer_num: int,
+                 activation: Callable = nn.ReLU(inplace=True),
+                 tied: bool = None,
+                 normalize: bool = False,
+                 project_dim: int = None,
+                 dataset_level_norm: bool = False):
+        super().__init__()
+        self.register_buffer('data_mean', torch.zeros(n_inputs, dtype=torch.float))
+        self.register_buffer('data_mean_counter', torch.tensor(0, dtype=torch.long))
+        self.normalize = normalize
+        self.dataset_level_norm = dataset_level_norm
+        assert layer_num >= 1
+        self.encoder = NaiveEncoder(n_latents, n_inputs, layer_num, activation, tied, normalize, project_dim, dataset_level_norm)
+        self.decoder = NaiveDecoder(n_latents, n_inputs, layer_num, activation, tied, normalize, project_dim, dataset_level_norm)
+        
+    def forward(self, x):
+        x = x.float()
+        if self.dataset_level_norm is True:
+            x = x - (self.data_mean)
+        x, info = self.preprocess(x)
+        latents = self.encoder(x)
+        recons = self.decode(latents, info)
+        return None, latents, recons
+
+    def preprocess(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
+        if not self.normalize:
+            return x, dict()
+        x, mu, std = LN(x)
+        return x, dict(mu=mu, std=std)
+    
+    def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
+        """
+        :param x: input data (shape: [batch, n_inputs])
+        :return: autoencoder latents (shape: [batch, n_latents])
+        """
+        x = x.float()
+        x, info = self.preprocess(x)
+        return self.encoder(x), info
+
+    def decode(self, latents: torch.Tensor, info: dict[str, Any] = None) -> torch.Tensor:
+        """
+        :param latents: autoencoder latents (shape: [batch, n_latents])
+        :return: reconstructed data (shape: [batch, n_inputs])
+        """
+        ret = self.decoder(latents)
+        if self.normalize:
+            assert info is not None
+            ret = ret * info["std"] + info["mu"]
+        return ret
+
+    def update_data_mean(self, x: torch.Tensor):
+        assert len(x.shape) == 2
+        x = x.to(self.device)
+        
+        batch_size = x.shape[0]
+        batch_mean = x.mean(dim=0)
+
+        delta = batch_mean - self.data_mean
+        total_n = self.data_mean_counter + batch_size
+
+        # Update mean
+        self.data_mean += delta * batch_size / total_n
+
+        # Update count
+        self.data_mean_counter = total_n
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+    
+class NaiveEncoder(nn.Module):
+    def __init__(self, 
+                 n_latents: int,
+                 n_inputs: int,
+                 layer_num: int,
+                 activation: Callable = nn.ReLU(inplace=True),
+                 tied: bool = None,
+                 noramalize: bool = False,
+                 project_dim: int = None,
+                 dataset_level_norm: bool = False):
+        super().__init__()
+
+        blocks = [nn.Linear(n_inputs, n_latents)]
+        
+        for _ in range(layer_num-1):
+            blocks.append(nn.ReLU(inplace=True))
+            blocks.append(nn.Linear(n_latents, n_latents))
+        #blocks.append(nn.ReLU(inplace=True))
+        self.blocks = nn.Sequential(*blocks)
+
+    def forward(self, input):
+        return self.blocks(input)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+class NaiveDecoder(nn.Module):
+    def __init__(self, 
+                 n_latents: int,
+                 n_inputs: int,
+                 layer_num: int,
+                 activation: Callable = nn.ReLU(inplace=True),
+                 tied: bool = None,
+                 noramalize: bool = False,
+                 project_dim: int = None,
+                 dataset_level_norm: bool = False):
+        super().__init__()
+
+        blocks = [nn.Linear(n_latents, n_latents)]
+        
+        for _ in range(layer_num-2):
+            blocks.append(nn.ReLU(inplace=True))
+            blocks.append(nn.Linear(n_latents, n_latents))
+        
+        if layer_num > 1:
+            blocks += [nn.ReLU(inplace=True), nn.Linear(n_latents, n_inputs)]
+        #blocks.append(nn.ReLU(inplace=True))
+        self.blocks = nn.Sequential(*blocks)
+
+    def forward(self, input):
+        return self.blocks(input)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device

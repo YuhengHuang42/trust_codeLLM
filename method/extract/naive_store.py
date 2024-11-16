@@ -228,6 +228,7 @@ class VariedKeyTensorStore(Dataset):
         This function is not class-specific but task-specific.
         But it is put here for interface convenience. 
         """
+        
         def collate_fn_plain(batch_info):
             """
             Collate multiple data points into one batch.
