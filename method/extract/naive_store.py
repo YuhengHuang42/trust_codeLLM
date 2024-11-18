@@ -252,13 +252,28 @@ class VariedKeyTensorStore(Dataset):
             mutated_shift_pointer = 0
             for item in batch_info:
                 item = item.to_dict()
-                original.append(item["original"]["hidden_states"])
-                original_length = item["original"]["hidden_states"].shape[0]
+                ori_hidden = item["original"]["hidden_states"]
+                neuron_num = ori_hidden.shape[-1]
+                if item["original"]["start_in"] == False:
+                    first_hidden = item["original"]["start_hidden"].reshape(1, neuron_num)
+                    ori_hidden = torch.cat([first_hidden, ori_hidden], dim=0)
+                    original_this_batch_shift = 1
+                else:
+                    original_this_batch_shift = 0
+                original.append(ori_hidden)
+                original_length = ori_hidden.shape[0]
                 for key in item["mutated_code"]:
-                    original_index.append(original_shift_pointer + item["mutated_code"][key]["contrastive_list_original"])
-                    mutated_index.append(mutated_shift_pointer + item["mutated_code"][key]["contrastive_list_mutated"])
-                    mutated.append(item["mutated_code"][key]["hidden_states"])
-                    mutated_shift_pointer += item["mutated_code"][key]["hidden_states"].shape[0]
+                    mutated_hidden = item["mutated_code"][key]["hidden_states"]
+                    if item["mutated_code"][key]["start_in"] == False:
+                        first_hidden = item["mutated_code"][key]["start_hidden"].reshape(1, neuron_num)
+                        mutated_hidden = torch.cat([first_hidden, mutated_hidden], dim=0)
+                        mutated_this_batch_shift = 1
+                    else:
+                        mutated_this_batch_shift = 0
+                    original_index.append(original_this_batch_shift + original_shift_pointer + item["mutated_code"][key]["contrastive_list_original"])
+                    mutated_index.append(mutated_this_batch_shift + mutated_shift_pointer + item["mutated_code"][key]["contrastive_list_mutated"])
+                    mutated.append(mutated_hidden)
+                    mutated_shift_pointer += mutated_hidden.shape[0]
                 original_shift_pointer += original_length
                 ori_div_list.append(original_shift_pointer - 1)
             return torch.cat(original), torch.cat(mutated), torch.cat(original_index), torch.cat(mutated_index), torch.tensor(ori_div_list)

@@ -12,7 +12,7 @@ import math
 import os
 import torchinfo
 
-from sae_model import Autoencoder, TopK, normalized_mean_squared_error, contrastive_loss, CCS_loss, contrastive_pred_loss
+from sae_model import Autoencoder, TopK, normalized_mean_squared_error, contrastive_loss, CCS_loss, contrastive_pred_loss, NaiveAutoEncoder
 from extract.naive_store import NaiveTensorStore, VariedKeyTensorStore
 
 def compute_grad_norm(model):
@@ -305,6 +305,11 @@ def main(
     model_save_freq_prop = config_dict["task_config"].get("model_save_freq_prop", 1)
     contrastive_loss_fn = config_dict["task_config"].get("contrastive_loss_fn", None)
     next_token_pred = config_dict["task_config"].get("next_token_pred", False)
+    model_type = config_dict["task_config"].get("model_type", "sae")
+    layer_num = config_dict["task_config"].get("layer_num", 3)
+    if model_type == "sae":
+        logger.warning("SAE Model does not support layer_num config, skip")
+    assert model_type in ["sae", "ae"]
     if next_token_pred is True:
         assert contrastive_loss_fn is not None
     assert contrastive_loss_fn in [None, "contrastive_loss", "ccs_loss", "contrastive_pred_loss"]
@@ -323,15 +328,29 @@ def main(
         project_dim = 1
     else:
         project_dim = None
-    sae = Autoencoder(
-        sae_hidden,
-        hidden_neuron,
-        activation=TopK(topk),
-        normalize=normalize,
-        tied=tied,
-        dataset_level_norm=dataset_level_norm,
-        project_dim=project_dim,
-    )
+    if model_type == "sae":
+        logger.info("Using SAE model")
+        sae = Autoencoder(
+            sae_hidden,
+            hidden_neuron,
+            activation=TopK(topk),
+            normalize=normalize,
+            tied=tied,
+            dataset_level_norm=dataset_level_norm,
+            project_dim=project_dim,
+        )
+    elif model_type == "ae":
+        logger.info("Using AE model")
+        sae = NaiveAutoEncoder(
+            sae_hidden,
+            hidden_neuron,
+            layer_num=layer_num,
+            activation=None,
+            normalize=normalize,
+            tied=tied,
+            dataset_level_norm=dataset_level_norm,
+            project_dim=project_dim,
+        )
     sae = sae.to(device)
     
     store_list = []

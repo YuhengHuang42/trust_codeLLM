@@ -548,6 +548,9 @@ class NaiveAutoEncoder(nn.Module):
         self.register_buffer('data_mean', torch.zeros(n_inputs, dtype=torch.float))
         self.register_buffer('data_mean_counter', torch.tensor(0, dtype=torch.long))
         self.normalize = normalize
+        self.n_latents = n_latents
+        self.n_inputs = n_inputs
+        self.layer_num = layer_num
         self.dataset_level_norm = dataset_level_norm
         assert layer_num >= 1
         self.encoder = NaiveEncoder(n_latents, n_inputs, layer_num, activation, tied, normalize, project_dim, dataset_level_norm)
@@ -607,6 +610,32 @@ class NaiveAutoEncoder(nn.Module):
     @property
     def device(self):
         return next(self.parameters()).device
+
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
+        sd = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+        sd["normalize"] = self.normalize
+        sd["n_latents"] = self.n_latents
+        sd["n_inputs"] = self.n_inputs
+        sd["layer_num"] = self.layer_num
+        return sd
+
+    @classmethod
+    def from_state_dict(
+        cls, state_dict: dict[str, torch.Tensor], strict: bool = True
+    ) -> "Autoencoder":
+        n_latents = state_dict.pop("n_latents")
+        n_inputs = state_dict.pop("n_inputs")
+        layer_num = state_dict.pop("layer_num")
+        normalize = state_dict.pop("normalize")
+        autoencoder = cls(n_latents=n_latents, 
+                          n_inputs=n_inputs, 
+                          layer_num=layer_num, 
+                          normalize=normalize, 
+                          )
+        # Load remaining state dict
+        autoencoder.load_state_dict(state_dict, strict=strict)
+        return autoencoder
+    
     
 class NaiveEncoder(nn.Module):
     def __init__(self, 

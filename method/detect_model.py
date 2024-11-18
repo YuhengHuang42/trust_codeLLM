@@ -13,7 +13,7 @@ from loguru import logger
 from torch.utils.data import Dataset
 import sispca
 
-from method.sae_model import Autoencoder
+from method.sae_model import Autoencoder, NaiveAutoEncoder
 # from sparse_autoencoder import LN
 
 def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, numeric_stability=1e-7):
@@ -254,15 +254,18 @@ class EncoderClassifier():
         if self.encoder is not None:
             encoder_device = self.encoder.device
             encoder_state_dict = self.encoder.cpu().state_dict()
+            encoder_type = self.encoder.__class__.__name__
         else:
             encoder_device = None
             encoder_state_dict = None
+            encoder_type = None
         torch.save({"model": self.clf,
                      "dim_red": self.dim_red, 
                      "param": self.fit_model_param, 
                      "model_type": self.model_type,
                      "device": encoder_device,
                      "encoder": encoder_state_dict,
+                     "encoder_type": encoder_type,
                      "sorting_code": self.sorting_code,
                      "vector_norm": self.vector_norm,
                      "external_dim_red_flag": self.external_dim_red_flag
@@ -281,7 +284,10 @@ class EncoderClassifier():
         device = loaded_info["device"]
         model.sorting_code = loaded_info["sorting_code"] if "sorting_code" in loaded_info else False
         if loaded_info["encoder"] is not None:
-            encoder = Autoencoder.from_state_dict(loaded_info["encoder"])
+            if loaded_info["encoder_type"] == "Autoencoder":
+                encoder = Autoencoder.from_state_dict(loaded_info["encoder"])
+            elif loaded_info["encoder_type"] == "NaiveAutoEncoder":
+                encoder = NaiveAutoEncoder.from_state_dict(loaded_info["encoder"])
             model.encoder = encoder.to(device)
         else:
             model.encoder = None

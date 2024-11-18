@@ -225,7 +225,7 @@ def main(
     logger.info(f"Using Model Type: {model_type}")
     #assert data_source in ["shelve", "tracer"]
     assert collect_type in ["attention", "hidden"]
-    assert mode in ["lbl", "sae", "internal_only"]
+    assert mode in ["lbl", "sae", "internal_only", "ae"]
     #assert dataset in ["humaneval", "safim"]
     FALLBACK_ARGS["model_name"] = model_name
     FALLBACK_ARGS["parallel"] = parallel
@@ -235,6 +235,10 @@ def main(
         assert encoder_path is not None
         encoder_param = torch.load(encoder_path)
         encoder = sae_model.Autoencoder.from_state_dict(encoder_param["model_state_dict"])
+    elif mode == "ae":
+        assert encoder_path is not None
+        encoder_param = torch.load(encoder_path)
+        encoder = sae_model.NaiveAutoEncoder.from_state_dict(encoder_param["model_state_dict"])
     else:
         encoder = None
 
@@ -285,12 +289,13 @@ def main(
     snapshot_x = {}
     store_y = {}
     train_y = []
-    
+    first_token_dict = {}
     if data_collection_flag:
         training_data = torch.load(training_data_path)
         logger.info(f"Load {collect_type} training data from {training_data_path}")
         snapshot_x = training_data["snapshot_x"]
         store_y = training_data["store_y"]
+        first_token_dict = training_data["first_token"]
         if model_type.lower() == "lstm":
             train_x = {key: {} for key in dataset_list}
             train_y = {key: {} for key in dataset_list}
@@ -299,6 +304,7 @@ def main(
                 if key not in data:
                     continue
                 snap_shot_single = snapshot_x[dataset_name][key]
+                first_token = first_token_dict[dataset_name][key]
                 data = data_line_token_pair[0][idx]
                 candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
                 input_token_length = data[key]["input_length"]
@@ -308,11 +314,11 @@ def main(
                         train_x[dataset_name][key] = torch.stack(snap_shot_single)
                     else:
                         train_x += [i for i in snap_shot_single]
-                elif mode == "sae" or mode == "internal_only":
+                elif (mode == "sae" or mode =="ae") or mode == "internal_only":
                     #latent_activations, _ = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
                     with torch.inference_mode():
                         snap_shot_single = torch.from_numpy(snap_shot_single)
-                        if mode == 'sae':
+                        if (mode == "sae" or mode =="ae"):
                             latent_activations, info = encoder.encode(snap_shot_single.to(encoder.device))
                         elif mode == "internal_only":
                             latent_activations = snap_shot_single
@@ -372,10 +378,11 @@ def main(
                         train_x[data_class_name][key] = torch.stack(al_result)
                     else:
                         train_x += [i for i in al_result]
-                elif mode == "sae" or mode == "internal_only":
+                elif (mode == "sae" or mode =="ae") or mode == "internal_only":
                     _, before_latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, None)
+                    first_token_dict[data_class_name][key] = snap_shot_single[input_token_length]
                     with torch.inference_mode():
-                        if mode == "sae":
+                        if (mode == "sae" or mode =="ae"):
                             latent_activations, info = encoder.encode(before_latent_activations.to(encoder.device))
                         elif mode == "internal_only":
                             latent_activations = before_latent_activations
@@ -389,7 +396,7 @@ def main(
                 else:
                     train_y += label_dict[key]
                 store_y[data_class_name][key] = label_dict[key]
-        torch.save({"snapshot_x": snapshot_x, "store_y": store_y}, training_data_path)
+        torch.save({"snapshot_x": snapshot_x, "store_y": store_y, "first_token": first_token_dict}, training_data_path)
     
     #for key in data:
     #    input_token_length = data[key]["input_length"]
@@ -408,7 +415,7 @@ def main(
     if mode == "lbl":
         clf = LBLRegression()
         clf.fit(train_x, train_y, model_type, fit_model_param, layer)
-    elif mode == "sae" or mode == "internal_only":
+    elif (mode == "sae" or mode =="ae") or mode == "internal_only":
         clf = EncoderClassifier()
         clf.fit(train_x, train_y, model_type, fit_model_param, encoder, vector_norm=vector_norm, external_proj=external_proj)
     clf.save(model_save_path)
