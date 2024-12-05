@@ -18,6 +18,8 @@ import subprocess
 import shutil
 import re
 import json
+from datasets import load_dataset
+import difflib
 
 import sys
 project_root = Path(__file__).resolve().parent.parent
@@ -29,7 +31,172 @@ from method.extract import extract_util
 from method.extract import naive_store
 from method.collect_hidden import PretrainCodedata
 
+class HumanEvalPack:
+    def __init__(self,
+                 dataset_name: str="bigcode/humanevalpack",
+                 feature_key_list: list=["python", "js", "java", "go", "cpp", "rust"],
+                 split_token="\n",
+                 original_label=1,
+                 mutated_label=2,
+                ):
+        self.feature_key_list = feature_key_list
+        self.split_token = split_token
+        self.data = []
+        self.original_label = original_label
+        self.mutated_label = mutated_label
+        for key in self.feature_key_list:
+            ds = load_dataset(dataset_name, key)["test"]
+            self.data += ds.to_list()
+    
+        self.processed_data = []
+        for item in self.data:
+            self.processed_data.append(self.process_single(item, split_token="\n", original_label=original_label, mutated_label=mutated_label))
+    
+    def __getitem__(self, index):
+        item = self.processed_data[index]
+        return item
 
+    def __len__(self):
+        return len(self.processed_data)
+    
+    def find_contrastive_index(self, correct_lines, buggy_lines):
+        """
+        return [INDEX of correct lines, INDEX of buggy lines] of the diff results on correct_lines and buggy_lines
+        This function has some hypotheses on the dataset characteristics (e.g., usually we get an equal tag after delete & insert), 
+        so it needs to be very careful when modified for use on other datasets.
+        """
+        result = []
+        # Initialize the SequenceMatcher
+        matcher = difflib.SequenceMatcher(None, correct_lines, buggy_lines)
+
+        # Get the opcodes which describe how to transform correct_lines into buggy_lines
+        opcodes = matcher.get_opcodes()
+
+        # Iterate over the opcodes and handle each case
+        for op_idx, (tag, i1, i2, j1, j2) in enumerate(opcodes):
+            if tag == 'equal':
+                # Lines are the same in both files; no action needed for your requirement
+                continue
+            elif tag == 'replace':
+                # Lines have been replaced
+                #for i in range(i1, i2):
+                #replace_correct_line = max(0, i2-1)
+                #replace_buggy_line = max(0, j2-1)
+                replace_correct_line = i1
+                replace_buggy_line = j1
+                result.append([replace_correct_line, replace_buggy_line, "replacce"])
+                #print(f"Line {replace_correct_line}: correct (replaced) - {correct_lines[replace_correct_line]}")
+                #print(f"Line {replace_buggy_line}: buggy (replacement) - {buggy_lines[replace_buggy_line]}")
+            elif tag == 'delete':
+                # Lines deleted from the correct code in the buggy code
+                # (Correct code line at the end of the chunk that has been deleted, Error code line at the deleted position)
+                match_flag = False
+                if (op_idx + 1) < len(opcodes):
+                    # Directly used the next matched one for contrastive learning
+                    # Directly used the next matched one for contrastive
+                    n_tag, i1, __, j1, ___ = opcodes[op_idx + 1]
+                    if n_tag == "equal":
+                        correct_line_num = i1 - 1
+                        buggy_line_num = j1 - 1
+                        match_flag = True
+                        correct_line = correct_lines[correct_line_num].strip()
+                        buggy_line = buggy_lines[buggy_line_num].strip()
+                if (match_flag is False) and (i2 - i1 > 0):
+                    # Correct code line at the end of the deleted chunk
+                    correct_line_num = i2 - 1  # Indexing starts from 0
+
+                    # Initialize correct_line
+                    correct_line = correct_lines[correct_line_num].strip()
+
+                    # If the correct line is empty, fall back to previous non-empty lines
+                    #while len(correct_line) == 0 and correct_line_num > 0:
+                    #    correct_line_num -= 1
+                    #    correct_line = correct_lines[correct_line_num].strip()
+
+                    # Buggy code line just before the deletion (context line)
+                    #if j1 - 1 >= 0:
+                    #    buggy_line_num = j1 - 1
+                    #    buggy_line = buggy_lines[buggy_line_num].strip()
+                    #else:
+                    #    # If deletion is at the start, use the first line
+                    #    buggy_line_num = 0
+                    #    buggy_line = buggy_lines[buggy_line_num].strip()
+                    if j1 - 1 >= 0 and len(buggy_lines[j1 - 1].strip()) == 0:
+                        buggy_line_num = j1 - 1
+                    else:
+                        buggy_line_num = j1
+                    buggy_line = buggy_lines[buggy_line_num].strip()
+
+                result.append([correct_line_num, buggy_line_num, "delete"])
+            elif tag == 'insert':
+                # Lines inserted in the buggy code
+                # (Correct code line at the position where the new lines are inserted, Error code line at the end of the inserted content)
+                match_flag = False
+                if (op_idx + 1) < len(opcodes):
+                    # Directly used the next matched one for contrastive learning
+                    n_tag, i1, __, j1, ___ = opcodes[op_idx + 1]
+                    if n_tag == "equal":
+                        correct_line_num = i1 - 1
+                        buggy_line_num = j1 - 1
+                        match_flag = True
+                if (match_flag is False) and (j2 - j1 > 0):
+                    # Correct code line at the insertion point
+                    if i1 < len(correct_lines):
+                        correct_line_num = i1  # Indexing starts from 0
+                    else:
+                        # If insertion is at the end, use the last line
+                        correct_line_num = len(correct_lines) - 1
+                        correct_line = correct_lines[correct_line_num].strip()
+                    # Error code line at the end of the inserted content
+                    buggy_line_num = j2 - 1  # Indexing starts from 0
+
+                correct_line = correct_lines[correct_line_num].strip()
+                buggy_line = buggy_lines[buggy_line_num].strip()
+                result.append([correct_line_num, buggy_line_num, "insert"])
+                #print(f"Insert - Correct line {correct_line_num}: '{correct_line}'")
+                #print(f"Insert - Buggy line {buggy_line_num}: '{buggy_line}'\n")
+        return result
+
+    def process_single(self, dp, split_token="\n", original_label=1, mutated_label=2):
+        problem_description = dp["prompt"]
+        code_description = ""
+        correct_code = remove_empty_lines(dp['canonical_solution'])
+        buggy_code = remove_empty_lines(dp['buggy_solution'])
+        if not correct_code.endswith("\n"):
+            correct_code += "\n"
+
+        if not buggy_code.endswith("\n"):
+            buggy_code += "\n"
+
+        correct_split_list =  utils.find_all_occurrences("\n", correct_code)
+        error_split_list = utils.find_all_occurrences("\n", buggy_code)
+        correct_lines = correct_code.split('\n')
+        buggy_lines = buggy_code.split('\n')
+        result = self.find_contrastive_index(correct_lines, buggy_lines)
+        contrastive_pair = [[], []]
+        for item in result:
+            contrastive_pair[0].append(min(item[0], len(correct_split_list) - 1))
+            contrastive_pair[1].append(min(item[1], len(error_split_list) - 1))
+        line_label = [original_label] * len(error_split_list)
+        for single in contrastive_pair[1]:
+            line_label[single] = mutated_label
+        item = {
+            "context": "",
+            "output": {
+                "code_description": code_description,
+                "problem_description": problem_description,
+                "code": correct_code,
+                "code_split_pos": correct_split_list
+            },
+            "mutated_code": {
+                "code": buggy_code,
+                "contrastive_pair": contrastive_pair,
+                "code_split_pos": error_split_list,
+                "line_label": line_label
+            }
+        }
+        return item
+    
 class UniversalMutation:
     def __init__(self, cache_dir: str, mutator_path: str):
         self.cache_dir = cache_dir
@@ -855,7 +1022,7 @@ def main(
     hidden_layer = config_dict["task_config"]["hidden_layer"]
     split_token = config_dict['task_config']["split_token"]
     dataset_name = config_dict['task_config']["dataset_name"]
-    mutation_prop = (config_dict['task_config']["mutation_prop"])
+    mutation_prop = config_dict['task_config'].get("mutation_prop", None)
     feature_key_list = config_dict['task_config']["feature_key_list"]
     dataset_path_list = config_dict['task_config'].get("dataset_path_list", None)
     
@@ -877,6 +1044,10 @@ def main(
             data_path=dataset_name,
             tokenizer=tokenizer,
         )
+    elif "humanevalpack" in dataset_name:
+        aug_times = 0
+        logger.info("Using HumanEvalPack as dataset")
+        data = HumanEvalPack(dataset_name=dataset_name, feature_key_list=feature_key_list)
     else:
         aug_times = len(mutation_prop)
         if dataset_path_list is not None:

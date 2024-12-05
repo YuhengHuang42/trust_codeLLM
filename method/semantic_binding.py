@@ -181,6 +181,115 @@ def get_error_line_info_from_completion(shelve_data, upper_bound_abs_num=5):
 '''
 
 '''
+
+def load_gt(data_source, dataset_list, data_path_list, important_label_path_list, tokenizer):
+    data_line_token_pair = [[], [], []]
+    for idx, source in enumerate(data_source):
+        important_label_path = important_label_path_list[idx]
+        data_path = data_path_list[idx]
+        dataset = dataset_list[idx]
+        if source == "shelve":
+            data = utils.load_shelve(data_path)
+            data = clean_data(data)
+            if dataset == "safim":
+                error_line_info, pop_key = get_error_line_info_from_completion(data)
+                for key in pop_key:
+                    data.pop(key)
+            else:
+                with open(important_label_path, "r") as ifile:
+                    error_line_info = json.load(ifile)
+        data_line_token_pair[0].append(data)
+        data_line_token_pair[1].append(error_line_info)
+        target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
+        data_line_token_pair[2].append(important_token_info)
+    return data_line_token_pair
+
+from method.semantic_binding import HARD_TOKEN_LIMIT, get_error_line_info_from_completion
+def clean_data(shelve_data):
+    all_keys = list(shelve_data.keys())
+    for key in all_keys:
+        if len(shelve_data[key]['gen_probs'][0]) <= 1:
+            shelve_data.pop(key)
+        if shelve_data[key]['input_length'] >= HARD_TOKEN_LIMIT:
+            shelve_data.pop(key)
+    return shelve_data
+    
+def load_gt(data_source, dataset_list, data_path_list, important_label_path_list, tokenizer):
+    data_line_token_pair = [[], [], []]
+    for idx, source in enumerate(data_source):
+        important_label_path = important_label_path_list[idx]
+        data_path = data_path_list[idx]
+        dataset = dataset_list[idx]
+        if source == "shelve":
+            data = utils.load_shelve(data_path)
+            data = clean_data(data)
+            if dataset == "safim":
+                error_line_info, pop_key = get_error_line_info_from_completion(data)
+                for key in pop_key:
+                    data.pop(key)
+            else:
+                with open(important_label_path, "r") as ifile:
+                    error_line_info = json.load(ifile)
+        data_line_token_pair[0].append(data)
+        data_line_token_pair[1].append(error_line_info)
+        target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
+        data_line_token_pair[2].append(important_token_info)
+    return data_line_token_pair
+
+def load_from_existing_data(training_data_path,
+                            mode, 
+                            pass_mode, 
+                            dataset_list, 
+                            data_line_token_pair,
+                            tokenizer,
+                            encoder,
+                            language="python",
+                           ):
+    training_data = torch.load(training_data_path)
+    train_x = []
+    train_y = []
+    snapshot_x = training_data["snapshot_x"]
+    store_y = training_data["store_y"]
+    first_token_info = training_data["first_token"]
+    if pass_mode == "dict":
+        train_x = {key: {} for key in dataset_list}
+        train_y = {key: {} for key in dataset_list}
+        first_token_dict = {key: {} for key in dataset_list}
+        first_token_in_dict = {key: {} for key in dataset_list}
+    for idx, dataset_name in enumerate(dataset_list):
+        for key in snapshot_x[dataset_name]:
+            data = data_line_token_pair[0][idx]
+            if key not in data:
+                continue
+            snap_shot_single = snapshot_x[dataset_name][key]
+            first_token_dict = first_token_info[0][dataset_name][key]
+            # This is only for HumanEval and SAFIM
+            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=[[0, len(data[key]["str_output"])]]) 
+            input_token_length = data[key]["input_length"]
+            if mode == "lbl":
+                #al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
+                if pass_mode == "dict":
+                    train_x[dataset_name][key] = torch.stack(snap_shot_single)
+                else:
+                    train_x += [i for i in snap_shot_single]
+            elif (mode == "sae" or mode =="ae") or mode == "internal_only":
+                #latent_activations, _ = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
+                with torch.inference_mode():
+                    snap_shot_single = torch.from_numpy(snap_shot_single)
+                    if (mode == "sae" or mode =="ae"):
+                        latent_activations, info = encoder.encode(snap_shot_single.to(encoder.device))
+                    elif mode == "internal_only":
+                        latent_activations = snap_shot_single
+                    if pass_mode == "dict":
+                        train_x[dataset_name][key] = latent_activations.cpu()
+                    else:
+                        train_x += [i for i in latent_activations]
+            if pass_mode == "dict":
+                train_y[dataset_name][key] = store_y[dataset_name][key]
+            else:
+                train_y += store_y[dataset_name][key]
+    return train_x, train_y, first_token_info[0], first_token_info[1]
+
 @app.command()
 def main(
     #important_label_path: Annotated[List[str], typer.Option()],
@@ -222,7 +331,12 @@ def main(
     vector_norm = config_dict["task_config"].get("vector_norm", False)
     model_type = config_dict["task_config"].get("model_type", "mlp")
     external_proj_path = config_dict["task_config"].get("external_proj_path", None)
+    model_type = model_type.lower()
     logger.info(f"Using Model Type: {model_type}")
+    if model_type == "lstm" or model_type == "attn":
+        pass_mode = "dict"
+    else:
+        pass_mode = "list"
     #assert data_source in ["shelve", "tracer"]
     assert collect_type in ["attention", "hidden"]
     assert mode in ["lbl", "sae", "internal_only", "ae"]
@@ -249,28 +363,7 @@ def main(
         external_proj = None
     tokenizer = utils.load_tokenizer(model_name)
     data_line_token_pair = [[], [], []]
-    for idx, source in enumerate(data_source):
-        important_label_path = important_label_path_list[idx]
-        data_path = data_path_list[idx]
-        dataset = dataset_list[idx]
-        if source == "shelve":
-            data = utils.load_shelve(data_path)
-            data = clean_data(data)
-            if dataset == "safim":
-                error_line_info, pop_key = get_error_line_info_from_completion(data)
-                for key in pop_key:
-                    data.pop(key)
-            else:
-                with open(important_label_path, "r") as ifile:
-                    error_line_info = json.load(ifile)
-        elif source == "tracer":
-            data = TracerData(data_path, tokenizer, random_sample=random_sample, additional_prompt=additional_prompt)
-            error_line_info = data.get_important_line_info()
-        data_line_token_pair[0].append(data)
-        data_line_token_pair[1].append(error_line_info)
-        target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
-        data_line_token_pair[2].append(important_token_info)
-        
+    data_line_token_pair = load_gt(data_source, dataset_list, data_path_list, important_label_path_list, tokenizer)
     ## Load model
     quantization = config_dict["llm_config"]["quantization"]
     #generate_config = config_dict["llm_config"]["generate_config"]
@@ -290,27 +383,32 @@ def main(
     store_y = {}
     train_y = []
     first_token_dict = {}
+    first_token_in_dict = {}
     if data_collection_flag:
-        training_data = torch.load(training_data_path)
         logger.info(f"Load {collect_type} training data from {training_data_path}")
+        train_x, train_y, first_token_dict, first_token_in_dict = load_from_existing_data(training_data_path, mode, pass_mode, dataset_list, data_line_token_pair, tokenizer, encoder)
+        """
+        training_data = torch.load(training_data_path)
         snapshot_x = training_data["snapshot_x"]
         store_y = training_data["store_y"]
-        first_token_dict = training_data["first_token"]
-        if model_type.lower() == "lstm":
+        first_token_info = training_data["first_token"]
+        if pass_mode == "dict":
             train_x = {key: {} for key in dataset_list}
             train_y = {key: {} for key in dataset_list}
+            first_token_dict = {key: {} for key in dataset_list}
+            first_token_in_dict = {key: {} for key in dataset_list}
         for idx, dataset_name in enumerate(dataset_list):
             for key in snapshot_x[dataset_name]:
+                data = data_line_token_pair[0][idx]
                 if key not in data:
                     continue
                 snap_shot_single = snapshot_x[dataset_name][key]
-                first_token = first_token_dict[dataset_name][key]
-                data = data_line_token_pair[0][idx]
+                first_token_dict = first_token_info[0][dataset_name][key]
                 candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
                 input_token_length = data[key]["input_length"]
                 if mode == "lbl":
                     #al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-                    if model_type.lower() == "lstm":
+                    if pass_mode == "dict":
                         train_x[dataset_name][key] = torch.stack(snap_shot_single)
                     else:
                         train_x += [i for i in snap_shot_single]
@@ -322,16 +420,17 @@ def main(
                             latent_activations, info = encoder.encode(snap_shot_single.to(encoder.device))
                         elif mode == "internal_only":
                             latent_activations = snap_shot_single
-                        if model_type.lower() == "lstm":
+                        if pass_mode == "dict":
                             train_x[dataset_name][key] = latent_activations.cpu()
                         else:
                             train_x += [i for i in latent_activations]
-                if model_type.lower() == "lstm":
+                if pass_mode == "dict":
                     train_y[dataset_name][key] = store_y[dataset_name][key]
                 else:
                     train_y += store_y[dataset_name][key]
+        """
     else:
-        if model_type.lower() == "lstm":
+        if pass_mode == "dict":
             train_x = {key: {} for key in dataset_list}
             train_y = {key: {} for key in dataset_list}
         for idx in range(len(data_line_token_pair[0])):
@@ -342,6 +441,8 @@ def main(
             data_class_name = dataset_list[idx]
             snapshot_x[data_class_name] = dict()
             store_y[data_class_name] = dict()
+            first_token_dict[data_class_name] = dict()
+            first_token_in_dict[data_class_name] = dict()
             if collect_type == "attention":
                 layer_name = LAYER_DICT[model_name][layer]
                 snap_shot_first, oom_keys = get_attn_snapshot(model, tokenizer, data, layer_name, None)
@@ -374,29 +475,30 @@ def main(
                 if mode == "lbl":
                     al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
                     snapshot_x[data_class_name][key] = al_result
-                    if model_type.lower() == "lstm":
+                    if pass_mode == "dict":
                         train_x[data_class_name][key] = torch.stack(al_result)
                     else:
                         train_x += [i for i in al_result]
                 elif (mode == "sae" or mode =="ae") or mode == "internal_only":
                     _, before_latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, None)
                     first_token_dict[data_class_name][key] = snap_shot_single[input_token_length]
+                    first_token_in_dict[data_class_name][key] = (candidate_tokens[0] == 0)
                     with torch.inference_mode():
                         if (mode == "sae" or mode =="ae"):
                             latent_activations, info = encoder.encode(before_latent_activations.to(encoder.device))
                         elif mode == "internal_only":
                             latent_activations = before_latent_activations
                     snapshot_x[data_class_name][key] = before_latent_activations.cpu().numpy()
-                    if model_type.lower() == "lstm":
+                    if pass_mode == "dict":
                         train_x[data_class_name][key] = latent_activations.cpu()
                     else:
                         train_x += [i for i in latent_activations]
-                if model_type.lower() == "lstm":
+                if pass_mode == "dict":
                     train_y[data_class_name][key] = label_dict[key]
                 else:
                     train_y += label_dict[key]
                 store_y[data_class_name][key] = label_dict[key]
-        torch.save({"snapshot_x": snapshot_x, "store_y": store_y, "first_token": first_token_dict}, training_data_path)
+        torch.save({"snapshot_x": snapshot_x, "store_y": store_y, "first_token": [first_token_dict, first_token_in_dict]}, training_data_path)
     
     #for key in data:
     #    input_token_length = data[key]["input_length"]
@@ -404,20 +506,28 @@ def main(
     #    al_result = collect_attention_map(attn_snapshot, attn_layer, input_token_length, candidate_tokens)
     #    train_x += [i for i in al_result]
     #    train_y += label_dict[key]
-    if model_type.lower() != "lstm":
+    train_info = dict()
+    if pass_mode == "list":
         train_x = np.stack(train_x)
         logger.info(f"Train X shape: {train_x.shape}")
         logger.info(f"Train Y Pos Label: {sum(train_y)}")
-    else:
-        train_x, train_y = flat_data_dict(train_x, train_y)
+        train_info["train_x"] = train_x
+        train_info["train_y"] = train_y
+    elif pass_mode == "dict":
+        train_x = flat_data_dict(train_x)
+        train_y = flat_data_dict(train_y)
+        first_token_dict = flat_data_dict(first_token_dict)
         logger.info(f"Train X shape: {sum([train_x[key].shape[0] for key in train_x])}")
         logger.info(f"Train Y Pos Label: {sum([sum(train_y[key]) for key in train_y])}")
+        train_info["train_x"] = train_x
+        train_info["train_y"] = train_y
+        train_info["context"] = first_token_dict
     if mode == "lbl":
         clf = LBLRegression()
-        clf.fit(train_x, train_y, model_type, fit_model_param, layer)
+        clf.fit(train_info, model_type, fit_model_param, layer)
     elif (mode == "sae" or mode =="ae") or mode == "internal_only":
         clf = EncoderClassifier()
-        clf.fit(train_x, train_y, model_type, fit_model_param, encoder, vector_norm=vector_norm, external_proj=external_proj)
+        clf.fit(train_info, model_type, fit_model_param, encoder, vector_norm=vector_norm, external_proj=external_proj)
     clf.save(model_save_path)
     accuracy, pred_profiler = clf.evaluate(train_x, train_y)
     logger.info(f"Accuracy on training data: {accuracy}")

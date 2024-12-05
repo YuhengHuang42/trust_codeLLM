@@ -12,6 +12,9 @@ from torch.nn.utils.rnn import pad_sequence
 from loguru import logger
 from torch.utils.data import Dataset
 import sispca
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from method.sae_model import Autoencoder, NaiveAutoEncoder
 # from sparse_autoencoder import LN
@@ -74,6 +77,13 @@ def collect_hidden_states(hidden_map, input_token_length, output_seg, encoder, b
     else:
         return None, hidden_all.cpu()
 
+def flat_data_dict(data_dict):
+    x = dict()
+    for dataset in data_dict:
+        for key in data_dict[dataset]:
+            x[f"{dataset}_{key}"] = data_dict[dataset][key]
+    return x
+"""
 def flat_data_dict(data_dict_x, data_dict_y):
     x = dict()
     y = dict()
@@ -82,6 +92,7 @@ def flat_data_dict(data_dict_x, data_dict_y):
             x[f"{dataset}_{key}"] = data_dict_x[dataset][key]  
             y[f"{dataset}_{key}"] = data_dict_y[dataset][key]
     return x, y
+"""
 
 def convert_to_torch_tensor(array):
     if isinstance(array, np.ndarray):
@@ -192,6 +203,101 @@ class SupervisedPrjection():
         model.vector_norm = loaded_info["vector_norm"]
         return model
         
+
+class ScaledDotProductAttention(nn.Module):
+    def __init__(self, d_k):
+        super(ScaledDotProductAttention, self).__init__()
+        self.scale = torch.sqrt(torch.tensor(d_k, dtype=torch.float32))
+
+    def forward(self, Q, K, V):
+        # Compute attention scores
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        # Apply softmax to get attention weights
+        attn_weights = F.softmax(scores, dim=-1)
+        # Weighted sum of values
+        output = torch.matmul(attn_weights, V)
+        return output, attn_weights
+        
+class AttentionModule(nn.Module):
+    def __init__(self, 
+                 code_num, 
+                 hidden_dim, 
+                 K, 
+                 output_dim=2,
+                 enable_input_proj=False,
+                 ln=True):
+        super(AttentionModule, self).__init__()
+        self.attention = ScaledDotProductAttention(hidden_dim)
+        self.V = torch.nn.Parameter(torch.randn(code_num, hidden_dim))
+        self.register_buffer('K', K)
+        #self.K = K # Constant
+        self.K.requires_grad = False
+        self.output_proj = nn.Bilinear(hidden_dim, hidden_dim, output_dim)  # Bilinear layer
+        self.hidden_dim = hidden_dim
+        self.enable_input_proj = enable_input_proj
+        self.left_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.right_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.ln = ln
+        self.relu = nn.ReLU()
+        if enable_input_proj:
+            self.input_proj = nn.Linear(hidden_dim, hidden_dim)
+        else:
+            self.input_proj = None
+
+    def LN(self, x: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mu = x.mean(dim=-1, keepdim=True)
+        x = x - mu
+        std = x.std(dim=-1, keepdim=True)
+        x = x / (std + eps)
+        return x, mu, std
+        
+    def forward(self, context_vec, X, repeat_counts=None):
+        # X: M * N
+        # Context_vec: (1, hidden_dim)
+        if repeat_counts == None:
+            repeat_counts = torch.tensor([len(X)]).to(self.device)
+        attn_output, attn_weights = self.attention(context_vec, self.K, self.V) # Output: 1*hidden_dim
+        
+        # Project the output back to d_model (optional, for integration into larger models)
+        if self.ln is True:
+            X, mu, std = self.LN(X)
+        if self.input_proj is None:
+            output = X
+        else:
+            output = self.input_proj(X) # M*hidden_dim
+        #attn_output_expanded = attn_output.unsqueeze(0)
+        #attn_output_expanded = attn_output.reshape(-1, output.size(0), self.hidden_dim)  # (batch_size, M, hidden_dim)
+        # (M*hidden_dim), (1*hidden_dim).T
+        attn_output = torch.repeat_interleave(attn_output, repeat_counts, dim=0)
+        #attn_output = attn_output.repeat(output.shape[0], 1)
+        output = self.left_proj(output)
+        output = self.relu(output)
+
+        attn_output = self.right_proj(attn_output)
+        attn_output = self.relu(attn_output)
+        output = self.output_proj(output, attn_output)
+        #output = self.relu(output)
+        output = nn.functional.log_softmax(output, dim=-1)
+        return output, attn_weights # M * 1
+
+    def predict_proba(self, context_vec, X, repeat_counts=None):
+        self.eval()
+        context_vec = convert_to_torch_tensor(context_vec)
+        if repeat_counts is not None:
+            repeat_counts = convert_to_torch_tensor(repeat_counts)
+            repeat_counts.to(self.device)
+        X = convert_to_torch_tensor(X).to(self.device)
+        if len(context_vec.shape) < 2:
+            context_vec = context_vec.unsqueeze(0)
+        context_vec = context_vec.to(self.device)
+        with torch.inference_mode():
+            output, _ = self.forward(context_vec, X, repeat_counts)
+            probabilities = torch.exp(output)
+        return probabilities.cpu().squeeze(0)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
         
 class EncoderClassifier():
     def __init__(self):
@@ -202,10 +308,12 @@ class EncoderClassifier():
         self.vector_norm = None
         self.external_dim_red_flag = False
         self.dim_red = None
+        self.hidden_first = None
+        self.encoder = None
+        self.sorting_code = False
         
-    def fit(self, 
-            train_x, 
-            train_y, 
+    def fit(self,
+            train_info,  
             model_type, 
             fit_model_param,
             encoder,
@@ -215,6 +323,8 @@ class EncoderClassifier():
         self.fit_model_param = fit_model_param
         self.vector_norm = vector_norm
         already_norm = False
+        train_x = train_info["train_x"]
+        train_y = train_info["train_y"]
         if vector_norm is True:
             train_x = train_x / np.linalg.norm(train_x, axis=1, keepdims=True)
             already_norm = True
@@ -249,6 +359,8 @@ class EncoderClassifier():
             self.clf = MLPClassifier(**fit_model_param).fit(train_x, train_y)
         elif self.model_type.lower() == "lstm":
             self.clf = LSTMPredictor(**fit_model_param).fit(train_x, train_y)
+        elif self.model_type.lower() == "attn":
+            self.clf = AttentionModule(**fit_model_param)
         
     def save(self, path):
         if self.encoder is not None:
@@ -283,10 +395,11 @@ class EncoderClassifier():
         model.dim_red = loaded_info["dim_red"]
         device = loaded_info["device"]
         model.sorting_code = loaded_info["sorting_code"] if "sorting_code" in loaded_info else False
+        encoder_type = loaded_info.get("encoder_type", "Autoencoder")
         if loaded_info["encoder"] is not None:
-            if loaded_info["encoder_type"] == "Autoencoder":
+            if encoder_type == "Autoencoder":
                 encoder = Autoencoder.from_state_dict(loaded_info["encoder"])
-            elif loaded_info["encoder_type"] == "NaiveAutoEncoder":
+            elif encoder_type == "NaiveAutoEncoder":
                 encoder = NaiveAutoEncoder.from_state_dict(loaded_info["encoder"])
             model.encoder = encoder.to(device)
         else:
@@ -306,8 +419,14 @@ class EncoderClassifier():
                 layer_info=None, 
                 input_token_length=None, 
                 candidate_tokens=None, 
-                x=None):
+                x=None,
+                first_token=None):
         assert (layer_info is not None or x is not None), "Either layer_info or before_enc should be provided."
+        if layer_info is not None:
+            self.hidden_first = layer_info.cpu()[input_token_length]
+        else:
+            self.hidden_first = first_token
+        self.hidden_first, _ = self.encoder.encode(self.hidden_first)
         latent, before_enc = collect_hidden_states(layer_info, input_token_length, candidate_tokens, self.encoder, before_enc=x)
         latent = latent.numpy().astype(np.float32)
         self.cache = before_enc.numpy().astype(np.float32)
@@ -324,7 +443,10 @@ class EncoderClassifier():
                 latent = self.dim_red.forward(latent, norm=not already_norm).numpy()
             else:
                 latent = self.dim_red.transform(latent)
-        y = self.clf.predict_proba(latent)
+        if self.model_type == "attn":
+            y = self.clf.predict_proba(self.hidden_first, latent)
+        else:
+            y = self.clf.predict_proba(latent)
         return y
     
     def predict_using_recorder(self, recorder, tokenized_info, input_token_length, candidate_tokens):
@@ -338,7 +460,7 @@ class EncoderClassifier():
             #y = self.clf.predict_proba(latent_activations)
             return y, self.cache
     
-    def evaluate(self, x, y):
+    def evaluate(self, x, y, context=None):
         pred_profiler = []
         if self.model_type.lower() != "lstm":
             pred_label_recoreder = []
@@ -353,7 +475,11 @@ class EncoderClassifier():
                         item = self.dim_red.forward(item, norm = not self.vector_norm).numpy()
                     else:
                         item = self.dim_red.transform(item)
-                pred = self.clf.predict_proba(item)
+                if self.model_type.lower() == "attn":
+                    hidden_first = context[idx]
+                    pred = self.clf.predict_proba(hidden_first, item)
+                else:
+                    pred = self.clf.predict_proba(item)
                 pred_result = pred[:, 1]
                 pred_profiler.append(pred_result)
                 pred_label = pred_result > 0.5
@@ -389,11 +515,14 @@ class LBLRegression():
         self.attn_layer = None
         self.model_type = None
         self.cache = None
+        self.hidden_first = None
         
-    def fit(self, train_x, train_y, model_type, fit_model_param, attn_layer):
+    def fit(self, train_info, model_type, fit_model_param, attn_layer):
         self.fit_model_param = fit_model_param
         self.attn_layer = attn_layer
         self.model_type = model_type
+        train_x = train_info["train_x"]
+        train_y = train_info["train_y"]
         if self.model_type.lower() == "logistic":
             self.clf = LogisticRegression(**fit_model_param).fit(train_x, train_y)
         elif self.model_type.lower() == "svm":
@@ -420,8 +549,8 @@ class LBLRegression():
         assert attn_snapshot is not None or x is not None, "Either attn_snapshot or before_enc should be provided."
         if x is None:
             al_result = collect_attention_map(attn_snapshot, self.attn_layer, input_token_length, candidate_tokens)
-            x = np.stack(al_result).astype(np.float32)
         self.cache = x
+        x = np.stack(al_result).astype(np.float32)
         y = self.clf.predict_proba(x)
         return y
     
@@ -436,7 +565,7 @@ class LBLRegression():
             return pred_result, self.cache
 
     def evaluate(self, x, y):
-        if self.model_type.lower() != "lstm":
+        if self.model_type.lower() != "lstm" or self.model_type.lower() != "attn":
             pred_label_recoreder = []
             for idx, item in enumerate(x):
                 pred = self.clf.predict_proba(item.reshape(1, -1))
@@ -529,7 +658,6 @@ class LSTMPredictor(nn.Module):
             tag_scores = self(convert_to_torch_tensor(embeddings_tensor).float().to(self.device), length)
             #_, predicted_tags = torch.max(tag_scores, dim=2)
             #predicted_tags = predicted_tags.squeeze(0).tolist()
-            tag_scores = nn.functional.log_softmax(tag_scores, dim=2)
             probabilities = torch.exp(tag_scores)
         return probabilities.cpu().squeeze(0)
 
@@ -558,13 +686,17 @@ def obtain_sorted_code(input_tensor, topk):
     return np.concatenate([normalized_index, sorted_array], axis=-1)
 
 class DictDataset(Dataset):
-    def __init__(self, dict_x, dict_y):
+    def __init__(self, dict_x, dict_y, dict_z=None):
         self.dict_x = dict_x
         self.dict_y = dict_y
+        self.dict_z = dict_z
         self.keys = sorted(self.dict_x.keys())
     
     def __getitem__(self, index):
-        return [self.dict_x[self.keys[index]], self.dict_y[self.keys[index]]]
+        return_item = [self.dict_x[self.keys[index]], self.dict_y[self.keys[index]]]
+        if self.dict_z is not None:
+            return_item.append(self.dict_z[self.keys[index]])
+        return return_item
     
     def __len__(self):
         return len(self.keys)
