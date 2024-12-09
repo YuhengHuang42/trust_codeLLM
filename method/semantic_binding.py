@@ -251,21 +251,20 @@ def load_from_existing_data(training_data_path,
     snapshot_x = training_data["snapshot_x"]
     store_y = training_data["store_y"]
     first_token_info = training_data["first_token"]
+    candidate_token_dict = training_data["candidate_token_dict"]
     if pass_mode == "dict":
         train_x = {key: {} for key in dataset_list}
         train_y = {key: {} for key in dataset_list}
-        first_token_dict = {key: {} for key in dataset_list}
-        first_token_in_dict = {key: {} for key in dataset_list}
     for idx, dataset_name in enumerate(dataset_list):
         for key in snapshot_x[dataset_name]:
             data = data_line_token_pair[0][idx]
             if key not in data:
                 continue
             snap_shot_single = snapshot_x[dataset_name][key]
-            first_token_dict = first_token_info[0][dataset_name][key]
+            #first_token_dict = first_token_info[0][dataset_name][key]
             # This is only for HumanEval and SAFIM
-            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=[[0, len(data[key]["str_output"])]]) 
-            input_token_length = data[key]["input_length"]
+            #candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=[[0, len(data[key]["str_output"])]]) 
+            #input_token_length = data[key]["input_length"]
             if mode == "lbl":
                 #al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
                 if pass_mode == "dict":
@@ -288,7 +287,7 @@ def load_from_existing_data(training_data_path,
                 train_y[dataset_name][key] = store_y[dataset_name][key]
             else:
                 train_y += store_y[dataset_name][key]
-    return train_x, train_y, first_token_info[0], first_token_info[1]
+    return train_x, train_y, first_token_info[0], first_token_info[1], candidate_token_dict
 
 @app.command()
 def main(
@@ -384,9 +383,10 @@ def main(
     train_y = []
     first_token_dict = {}
     first_token_in_dict = {}
+    candidate_token_dict = {}
     if data_collection_flag:
         logger.info(f"Load {collect_type} training data from {training_data_path}")
-        train_x, train_y, first_token_dict, first_token_in_dict = load_from_existing_data(training_data_path, mode, pass_mode, dataset_list, data_line_token_pair, tokenizer, encoder)
+        train_x, train_y, first_token_dict, first_token_in_dict, candidate_token_dict = load_from_existing_data(training_data_path, mode, pass_mode, dataset_list, data_line_token_pair, tokenizer, encoder)
         """
         training_data = torch.load(training_data_path)
         snapshot_x = training_data["snapshot_x"]
@@ -440,6 +440,7 @@ def main(
             important_token_info = data_line_token_pair[2][idx]
             data_class_name = dataset_list[idx]
             snapshot_x[data_class_name] = dict()
+            candidate_token_dict[data_class_name] = dict()
             store_y[data_class_name] = dict()
             first_token_dict[data_class_name] = dict()
             first_token_in_dict[data_class_name] = dict()
@@ -472,6 +473,7 @@ def main(
                 snap_shot_single = snap_shot[key]
                 #snapshot_x[data_class_name][key] = snap_shot_single
                 input_token_length = data[key]["input_length"]
+                candidate_token_dict[data_class_name][key] = candidate_tokens
                 if mode == "lbl":
                     al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
                     snapshot_x[data_class_name][key] = al_result
@@ -498,7 +500,11 @@ def main(
                 else:
                     train_y += label_dict[key]
                 store_y[data_class_name][key] = label_dict[key]
-        torch.save({"snapshot_x": snapshot_x, "store_y": store_y, "first_token": [first_token_dict, first_token_in_dict]}, training_data_path)
+        torch.save({"snapshot_x": snapshot_x, 
+                    "store_y": store_y, 
+                    "first_token": [first_token_dict, first_token_in_dict],
+                    "candidate_token_dict": candidate_token_dict,
+                    }, training_data_path)
     
     #for key in data:
     #    input_token_length = data[key]["input_length"]

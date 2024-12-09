@@ -22,10 +22,9 @@ sys.path.append(str(project_root))
 
 import method.extract.extract_util as extract_util
 from method import detect_model
-from detect_model import AttentionModule, ScaledDotProductAttention
+from detect_model import AttentionModule, ScaledDotProductAttention, RankNet
 import utility.utils as utils
 from task import dataset_utils
-
 
 STORE = 0
 LOAD = 1
@@ -116,7 +115,7 @@ def evaluate_binding(data,
                 try:
                     #snapshot = model.forward(**tokenized_info, output_attentions=True)
                     #snapshot, hook_info = recorder.forward(tokenized_info)
-                    pred_result, pred_input = detection_model.predict_using_recorder(recorder, tokenized_info, input_token_length, candidate_tokens)
+                    rank_per_line, y, _ = detection_model.predict_using_recorder(recorder, tokenized_info, input_token_length, candidate_tokens)
                 except torch.cuda.OutOfMemoryError as e:
                     oom_keys.append(key)
                     torch.cuda.empty_cache()
@@ -130,18 +129,18 @@ def evaluate_binding(data,
             else:
                 code_blocks_info = [[0, len(data[key]["str_output"])]]
             candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
-            pred_result = detection_model.predict(x=before_act_dict[key], first_token=first_token_info_dict[key])
+            rank_per_line, y = detection_model.predict(x=before_act_dict[key], first_token=first_token_info_dict[key])
         #attn_snapshot = hook_info[layer]
         #del snapshot
         # Inference process of LBL baseline method
         #pred_result = detection_model.predict([attn_snapshot], input_token_length, candidate_tokens)
         #pred_profiler.append(pred_input)
-        pred_result = pred_result[:, 1]
-        result[key] = pred_result
-        rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk]
+        #pred_result = pred_result[:, 1]
+        result[key] = [y, rank_per_line]
+        #rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk]
         selected_token = set()
-        for line in rank_per_line:
-            selected_token = selected_token.union(set(candidate_tokens[line[1]]))
+        for line in rank_per_line[:topk]:
+            selected_token = selected_token.union(set(candidate_tokens[int(line)]))
         
         topk_score = compute_hit(important_token_info[key], selected_token)
         score += topk_score
@@ -327,8 +326,8 @@ def main(
         recall_score = 0
         counter = 0
         for key in result:
-            pred_result = result[key]
-            rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk_iter]
+            recorded_result = result[key]
+            rank_per_line = recorded_result[1][:topk_iter]
             if extract_code:
                 code_blocks_info = None
             else:
@@ -336,7 +335,7 @@ def main(
             candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
             selected_token = set()
             for line in rank_per_line:
-                selected_token = selected_token.union(set(candidate_tokens[line[1]]))
+                selected_token = selected_token.union(set(candidate_tokens[line]))
             
             hit_score += compute_hit(important_token_info[key], selected_token)
             recall_score += compute_recall(important_token_info[key], selected_token)
@@ -346,7 +345,10 @@ def main(
         topk_recorder['recall']["top{}".format(topk_iter)] = recall_score / counter
     
     for key in result:
-        result[key] = result[key].tolist()
+        if isinstance(result[key][0], torch.Tensor):
+            result[key][0] = result[key][0].tolist()
+        if isinstance(result[key][1], torch.Tensor):
+            result[key][1] = result[key][1].tolist()
     
     with open(result_output_path, "w") as ofile:
         json.dump({"result": topk_recorder, "pred_result": result, "OOM_keys": oom_keys}, ofile)

@@ -15,9 +15,16 @@ import sispca
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from abc import ABC
+from abc import abstractmethod
+from itertools import zip_longest
+from torch.nn.utils.rnn import pad_sequence
 
 from method.sae_model import Autoencoder, NaiveAutoEncoder
 # from sparse_autoencoder import LN
+
+PADDED_Y_VALUE = -1
+DEFAULT_EPS = 1e-5
 
 def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, numeric_stability=1e-7):
     """
@@ -298,8 +305,255 @@ class AttentionModule(nn.Module):
     @property
     def device(self):
         return next(self.parameters()).device
+
+class RiskPredictor(ABC):
+    @abstractmethod
+    def fit(self):
+        return NotImplemented
+    
+    def save(self, path):
+        return NotImplemented
+    
+    @abstractmethod
+    def predict(self):
+        return NotImplemented
+    
+    @abstractmethod
+    def predict_using_recorder(self):
+        return NotImplemented
+    
+    @abstractmethod
+    def evaluate(self):
+        return NotImplemented
+    
+
+class RankNet(nn.Module):
+    def __init__(self, n_inputs, layer_num, hidden_size, device="cuda", lr=1e-4, num_epochs=20, batch_size=4):
+        super(RankNet, self).__init__()
+        self.n_inputs = n_inputs
+        self.layer_num = layer_num
+        self.hidden_size = hidden_size
+        blocks = [nn.Linear(n_inputs, hidden_size)]
+        for _ in range(layer_num-1):
+            blocks.append(nn.ReLU(inplace=True))
+            blocks.append(nn.Linear(hidden_size, hidden_size))
+        blocks.append(nn.ReLU(inplace=True))
+        blocks.append(nn.Linear(hidden_size, 1))
+        self.blocks = nn.Sequential(*blocks)
         
-class EncoderClassifier():
+        self.sigmoid = nn.Sigmoid()
+        
+        self.device = device
+        self.lr = lr
+        self.num_epochs = num_epochs
+        self.batch_size = batch_size
+        self.to(device)
+        
+
+    def forward(self, input_1):
+        return torch.squeeze(self.sigmoid(self.blocks(input_1)), dim=-1)
+    
+    def fit(self, train_x, train_y, candidate_token_dict):
+        dataset = DictDataset(train_x, train_y, candidate_token_dict)
+        
+        collate_fn = self.get_collate_fn()
+        train_loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn)
+        loss_function = RankNet.approxNDCGLoss
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)
+        for epoch in range(self.num_epochs):
+            total_loss = 0
+            for x, y in train_loader:
+                optimizer.zero_grad()
+                x = x.to(self.device)
+                y = y.to(self.device)
+                #context = context.to(device)
+                #lengths = lengths.to(device)
+
+                output = self(x)
+                
+                loss = loss_function(output, y)
+                loss.backward()
+                #torch.nn.utils.clip_grad_norm_(am.parameters(), 1, error_if_nonfinite=True)
+                optimizer.step()
+                #print(compute_grad_norm(am))
+                total_loss += loss.item()
+    
+    def get_collate_fn(self, fillvalue=-1):
+        def collate_fn(batch):
+            x, y, candidate_token = zip(*batch)
+            #lengths = [len(seq) for seq in x]
+            rank_y = []
+            for idx, item in enumerate(y):
+                rank_y.append(RankNet.assign_and_normalize_scores(item, candidate_token[idx]))
+                
+            # Find the maximum length
+            max_length = max(len(item) for item in rank_y)
+
+            # Pad sequences with zeros and convert to tensor
+            padded_rank_y = torch.tensor(
+                list(zip_longest(*rank_y, fillvalue=fillvalue)), dtype=torch.float32
+            ).transpose(0, 1)  # Transpose to get (batch_size, max_length)
+            
+            padded_x = pad_sequence(x, batch_first=True, padding_value=-1)
+            
+            return padded_x, padded_rank_y
+        return collate_fn
+    
+    def predict(self, x):
+        with torch.inference_mode():
+            x = x.to(self.device)
+            y = self(x).cpu()
+            ranking = torch.sort(y, dim=-1, descending=True).indices.tolist()
+            return ranking, y
+    
+    def predict_proba(self, x):
+        x = convert_to_torch_tensor(x)
+        x = x.to(self.device)
+        ranking, y = self.predict(x)
+        return ranking, y
+    
+
+    @classmethod
+    def load(cls, path, device=None):
+        loaded_info = torch.load(path)
+        n_inputs = loaded_info["meta"]["n_inputs"]
+        layer_num = loaded_info["meta"]["layer_num"]
+        hidden_size = loaded_info["meta"]["hidden_size"]
+        lr = loaded_info["meta"]["lr"]
+        num_epochs = loaded_info["meta"]["num_epochs"]
+        batch_size = loaded_info["meta"]["batch_size"]
+        parameter_dict = {
+            "n_inputs": n_inputs,
+            "layer_num": layer_num,
+            "hidden_size": hidden_size,
+            "lr": lr,
+            "num_epochs": num_epochs,
+            "batch_size": batch_size
+        }
+        if device is not None:
+            parameter_dict["device"] = device
+        model = cls(**parameter_dict)
+        model.load_state_dict(loaded_info["state_dict"])
+        #model.encoder = encoder.to(device)
+        return model
+    
+    def save(self, path):
+        torch.save({
+            "meta": {
+                "n_inputs": self.n_inputs,
+                "layer_num": self.layer_num,
+                "hidden_size": self.hidden_size,
+                "lr": self.lr,
+                "num_epochs": self.num_epochs,
+                "batch_size": self.batch_size
+            },
+            "state_dict": self.state_dict()
+        }, path)
+    
+    @staticmethod
+    def assign_and_normalize_scores(line_label, candidate_token):
+        """
+        Assign and normalize scores to data points based on the following rules:
+        1. For data points with line_label >= 1, their scores must be higher than those with line_label == 0.
+        2. Data points with line_label == 0 must have the same score.
+        3. For data points with line_label == 1, those with higher line_length get higher scores.
+        4. Normalize all scores to [0, 1], with the highest score as 1.
+
+        Args:
+            line_label (list): A list of labels for each data point.
+            candidate_token (list): A list of candidate tokens
+
+        Returns:
+            list: A list of normalized scores assigned to each data point.
+        """
+        line_length = [len(i) for i in candidate_token]
+        # Initialize raw scores
+        raw_scores = [0] * len(line_label)
+
+        # Determine the base scores for each label category
+        score_zero = 1  # Base score for label == 0
+        score_one_base = 10  # Base score for label == 1
+        score_high_label_base = 20  # Base score for label > 1
+
+        # Process data points with label == 0
+        for i, label in enumerate(line_label):
+            if label >= 0:
+                raw_scores[i] = score_zero
+
+        # Process data points with label == 1
+        # Sort indices by length for label == 1
+        one_indices = [i for i, label in enumerate(line_label) if label == 1]
+        one_indices_sorted = sorted(one_indices, key=lambda i: line_length[i])
+        for rank, i in enumerate(one_indices_sorted):
+            raw_scores[i] = score_one_base + rank  # Increment score based on rank
+
+        # Process data points with label > 1
+        for i, label in enumerate(line_label):
+            if label > 1:
+                raw_scores[i] = score_high_label_base + label  # Ensure scores are greater than label == 0
+
+        # Normalize raw scores to [0, 1]
+        min_score = min(raw_scores)
+        max_score = max(raw_scores)
+        normalized_scores = [
+            (score - min_score) / (max_score - min_score) if max_score > min_score else 0
+            for score in raw_scores
+        ]
+
+        return normalized_scores
+
+    @staticmethod
+    def approxNDCGLoss(y_pred, y_true, eps=DEFAULT_EPS, padded_value_indicator=PADDED_Y_VALUE, alpha=1.):
+        """
+        Loss based on approximate NDCG introduced in "A General Approximation Framework for Direct Optimization of
+        Information Retrieval Measures". Please note that this method does not implement any kind of truncation.
+        :param y_pred: predictions from the model, shape [batch_size, slate_length]
+        :param y_true: ground truth labels, shape [batch_size, slate_length]
+        :param eps: epsilon value, used for numerical stability
+        :param padded_value_indicator: an indicator of the y_true index containing a padded item, e.g. -1
+        :param alpha: score difference weight used in the sigmoid function
+        :return: loss value, a torch.Tensor
+        """
+        device = y_pred.device
+        y_pred = y_pred.clone()
+        y_true = y_true.clone()
+
+        padded_mask = y_true == padded_value_indicator
+        y_pred[padded_mask] = float("-inf")
+        y_true[padded_mask] = float("-inf")
+
+        # Here we sort the true and predicted relevancy scores.
+        y_pred_sorted, indices_pred = y_pred.sort(descending=True, dim=-1)
+        y_true_sorted, _ = y_true.sort(descending=True, dim=-1)
+
+        # After sorting, we can mask out the pairs of indices (i, j) containing index of a padded element.
+        true_sorted_by_preds = torch.gather(y_true, dim=1, index=indices_pred)
+        true_diffs = true_sorted_by_preds[:, :, None] - true_sorted_by_preds[:, None, :]
+        padded_pairs_mask = torch.isfinite(true_diffs)
+        padded_pairs_mask.diagonal(dim1=-2, dim2=-1).zero_()
+
+        # Here we clamp the -infs to get correct gains and ideal DCGs (maxDCGs)
+        true_sorted_by_preds.clamp_(min=0.)
+        y_true_sorted.clamp_(min=0.)
+
+        # Here we find the gains, discounts and ideal DCGs per slate.
+        pos_idxs = torch.arange(1, y_pred.shape[1] + 1).to(device)
+        D = torch.log2(1. + pos_idxs.float())[None, :]
+        maxDCGs = torch.sum((torch.pow(2, y_true_sorted) - 1) / D, dim=-1).clamp(min=eps)
+        G = (torch.pow(2, true_sorted_by_preds) - 1) / maxDCGs[:, None]
+
+        # Here we approximate the ranking positions according to Eqs 19-20 and later approximate NDCG (Eq 21)
+        scores_diffs = (y_pred_sorted[:, :, None] - y_pred_sorted[:, None, :])
+        scores_diffs[~padded_pairs_mask] = 0.
+        approx_pos = 1. + torch.sum(padded_pairs_mask.float() * (torch.sigmoid(-alpha * scores_diffs).clamp(min=eps)), dim=-1)
+        approx_D = torch.log2(1. + approx_pos)
+        approx_NDCG = torch.sum((G / approx_D), dim=-1)
+
+        return -torch.mean(approx_NDCG)
+
+
+        
+class EncoderClassifier(RiskPredictor):
     def __init__(self):
         self.fit_model_param = None
         self.clf = None
@@ -445,9 +699,18 @@ class EncoderClassifier():
                 latent = self.dim_red.transform(latent)
         if self.model_type == "attn":
             y = self.clf.predict_proba(self.hidden_first, latent)
+            pred_result = y[:, 1]
+            rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)
+            rank_per_line = [i[1] for i in rank_per_line]
+        elif self.model_type == "ranker":
+            rank_per_line, y = self.clf.predict_proba(latent)
         else:
             y = self.clf.predict_proba(latent)
-        return y
+            pred_result = y[:, 1]
+            rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)
+            rank_per_line = [i[1] for i in rank_per_line]
+    
+        return rank_per_line, y
     
     def predict_using_recorder(self, recorder, tokenized_info, input_token_length, candidate_tokens):
         with torch.inference_mode():
@@ -455,10 +718,10 @@ class EncoderClassifier():
             hidden_states = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
             hidden_states = hidden_states[0][0] # (token_num, hidden_size)
             recorder.clear_cache()
-            y = self.predict(hidden_states, input_token_length, candidate_tokens)
+            rank_per_line, y = self.predict(hidden_states, input_token_length, candidate_tokens)
             #latent_activations, _ = collect_hidden_states(hidden_states, input_token_length, candidate_tokens, self.encoder).numpy()
             #y = self.clf.predict_proba(latent_activations)
-            return y, self.cache
+            return rank_per_line, y, self.cache
     
     def evaluate(self, x, y, context=None):
         pred_profiler = []
@@ -552,7 +815,11 @@ class LBLRegression():
         self.cache = x
         x = np.stack(al_result).astype(np.float32)
         y = self.clf.predict_proba(x)
-        return y
+
+        pred_result = y[:, 1]
+        rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)
+        rank_per_line = [i[1] for i in rank_per_line]
+        return rank_per_line, y
     
     def predict_using_recorder(self, recorder, tokenized_info, input_token_length, candidate_tokens):
         with torch.inference_mode():
@@ -560,9 +827,9 @@ class LBLRegression():
             attn_snapshot = hook_info[list(recorder.layer_names.keys())[0]] # Only one layer
             recorder.clear_cache()
 
-            pred_result = self.predict([attn_snapshot], input_token_length, candidate_tokens)
+            rank_per_line, y = self.predict([attn_snapshot], input_token_length, candidate_tokens)
             
-            return pred_result, self.cache
+            return rank_per_line, y, self.cache
 
     def evaluate(self, x, y):
         if self.model_type.lower() != "lstm" or self.model_type.lower() != "attn":
