@@ -12,6 +12,8 @@ import numpy as np
 import difflib
 from loguru import logger
 
+HARD_TOKEN_LIMIT = 4096 - 512
+
 def match_token_in_offset_mapping(offset_mapping, start_pos, end_pos):
     """
     Match the target_str in the tokenized_info["offset_mapping"].
@@ -247,9 +249,9 @@ def get_important_token_pos(important_line_info, data, tokenizer):
             
             mapping_result = [line_char_mapping[i] for i in cleaned_line_number]
             target_buggy_positions[key] += mapping_result
-            important_token_info[key].append([])
+            #important_token_info[key].append([])
             for single in mapping_result:
-                important_token_info[key][-1] += get_token_indices(tokenized_info["offset_mapping"], single[0], single[1])
+                important_token_info[key].append(get_token_indices(tokenized_info["offset_mapping"], single[0], single[1]))
     return (target_buggy_positions, important_token_info)
 
 

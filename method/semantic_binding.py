@@ -38,7 +38,7 @@ LAYER_DICT = {
         -1: "model.layers.47.self_attn"
     }
 }
-HARD_TOKEN_LIMIT = 4096 - 512
+from utility.utils import HARD_TOKEN_LIMIT
 
 class TracerData():
     def __init__(self, 
@@ -204,7 +204,6 @@ def load_gt(data_source, dataset_list, data_path_list, important_label_path_list
         data_line_token_pair[2].append(important_token_info)
     return data_line_token_pair
 
-from method.semantic_binding import HARD_TOKEN_LIMIT, get_error_line_info_from_completion
 def clean_data(shelve_data):
     all_keys = list(shelve_data.keys())
     for key in all_keys:

@@ -346,7 +346,9 @@ def main(
         oom_keys = dict()
         
     topk_recorder = {"hit_rate": {}, "recall": {}, "hit_line_rate": {}}
+    hit_detail = dict()
     for topk_iter in [1, 3, 5, 10]:
+        hit_detail["top{}".format(topk_iter)] = dict()
         hit_score = 0
         hit_line_score = 0
         recall_score = 0
@@ -367,9 +369,20 @@ def main(
                 selected_token = utils.obtain_topk_tokens_by_prob(data, candidate_tokens, key, topk_iter, np.mean)
                 result[key] = [None, list(selected_token)]
             
-            hit_score += compute_hit(important_token_info[key], selected_token)
-            hit_line_score += compute_hit_line(important_token_info[key], selected_token)
-            recall_score += compute_recall(important_token_info[key], selected_token)
+            cur_hit_score = compute_hit(important_token_info[key], selected_token)
+            cur_hit_line_score = compute_hit_line(important_token_info[key], selected_token)
+            cur_recall_score = compute_recall(important_token_info[key], selected_token)
+            
+            hit_detail["top{}".format(topk_iter)][key] = {"hit": cur_hit_score, 
+                                                          "hit_line": cur_hit_line_score, 
+                                                          "recall": cur_recall_score,
+                                                          "gt": important_token_info[key],
+                                                          "selected_token": list(selected_token)
+                                                          }
+            
+            hit_score += cur_hit_score
+            hit_line_score += cur_hit_line_score
+            recall_score += cur_recall_score
             
             counter += 1
         topk_recorder['hit_rate']["top{}".format(topk_iter)] = hit_score / counter
@@ -385,7 +398,7 @@ def main(
         
     
     with open(result_output_path, "w") as ofile:
-        json.dump({"result": topk_recorder, "pred_result": result, "OOM_keys": oom_keys}, ofile)
+        json.dump({"result": topk_recorder, "pred_result": result, "OOM_keys": oom_keys, "hit_detail": hit_detail}, ofile)
 
 if __name__ == "__main__":
     app()

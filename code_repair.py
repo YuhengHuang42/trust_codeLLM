@@ -10,15 +10,28 @@ import shelve
 import os
 from transformers import GenerationConfig
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+from utility.utils import HARD_TOKEN_LIMIT
+import utility.utils as utils
+from task.defect4j import Defects4jDataset
+from task.quixbug import QuixbugDatasetPy
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
+
 CODE_NOT_FOUND_FLAG = "NO_CODE"
 
 global_eof_stops = ['// Buggy Function', '// Fixed Function', '# Buggy Function', '# Fixed Function',
                     '/* Buggy Function */', '/* Fixed Function */', '<|endoftext|>']
-    
-def evaluate(llm, tokenizer, dataset, generate_config, ans_recored, iter_list=None, ext_gen_config=None):
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+def evaluate(llm, 
+             tokenizer, 
+             dataset, 
+             generate_config, 
+             ans_recored, 
+             iter_list=None, 
+             ext_gen_config=None
+             ):
     import utility.utils as utils
     generate_config = copy.deepcopy(generate_config)
     #prompt = generate_config.pop("prompt")
@@ -26,7 +39,12 @@ def evaluate(llm, tokenizer, dataset, generate_config, ans_recored, iter_list=No
         iter_list = range(len(dataset))
     
     for idx in tqdm.tqdm(iter_list):
-        prompt = dataset.get_prompt(dataset.index[idx])
+        prompt, bug_func = dataset.get_prompt(dataset.index[idx])
+        max_new_tokens = int(2*len(tokenizer.encode(bug_func, return_tensors='pt', add_special_tokens=False)[0])) # reference:
+        max_token_all = len(tokenizer.encode(prompt, return_tensors='pt')[0]) + max_new_tokens
+        if max_token_all > HARD_TOKEN_LIMIT:
+            continue
+        generate_config["max_new_tokens"] = max_new_tokens
         generate_result = utils.generate_and_record(
             llm,
             tokenizer,
@@ -66,9 +84,6 @@ def main(
         cache_dir = config_dict["system_setting"]["cache_dir"]
     else:
         cache_dir = None
-    import utility.utils as utils
-    from task.defect4j import Defects4jDataset
-    from task.quixbug import QuixbugDataset
     data_path = config_dict["task_config"]["repair_data_path"]
     loc_folder = config_dict["task_config"]["repair_loc_folder"]
     defects4j_path = config_dict["system_setting"].get('DEFECTS4J_PATH', None)
@@ -88,7 +103,7 @@ def main(
         generation_config = GenerationConfig.from_pretrained(model_name,)
         generation_config.stop_strings = global_eof_stops + ["// Provide a fix for the buggy function"]
     elif task.lower() == "quixbug":
-        dataset = QuixbugDataset(data_path, "/tmp/quixbug", loc_folder)
+        dataset = QuixbugDatasetPy(data_path, "/tmp/quixbug", loc_folder)
         already_saved_length, saved_path = utils.load_shelve_and_resume(os.path.dirname(str(output_path)))
         generation_config = GenerationConfig.from_pretrained(model_name,)
         generation_config.stop_strings = global_eof_stops + ["# Provide a fix for the buggy function"]

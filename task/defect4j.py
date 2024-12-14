@@ -1,3 +1,4 @@
+# Refenrece: Automated Program Repair in the Era of Large Pre-trained Language Models
 from loguru import logger
 import json
 import subprocess
@@ -72,6 +73,58 @@ PLs: Java, Python
 
 #export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
 #export PATH=$PATH:$JAVA_HOME/bin
+
+def extract_complete_methods(java_code: str) -> str:
+    # Regex pattern for the start of a method
+    # This is a simplified pattern and may need adjustments for complex code.
+    # Explanation:
+    # - We look for something that might represent a return type (like int, void, List<String>, etc.)
+    # - Then a method name followed by parentheses with optional parameters
+    # - Followed by an opening brace.
+    method_start_pattern = re.compile(r'((?:public|protected|private|static|\s)*[\w\<\>\[\]]+\s+\w+\s*\([^)]*\)\s*\{)')
+    
+    lines = java_code.split('\n')
+    output_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        start_match = method_start_pattern.search(line)
+        if start_match:
+            # We found a potential method start on this line
+            # We need to see if we can find its matching closing brace
+            method_lines = [line]
+            i += 1
+            brace_count = 0
+            
+            # Count braces in the start line
+            # Start line definitely has at least one '{'
+            brace_count += line.count('{')
+            brace_count -= line.count('}')
+            
+            # Read forward until braces are balanced or we run out of lines
+            while i < len(lines) and brace_count > 0:
+                next_line = lines[i]
+                method_lines.append(next_line)
+                brace_count += next_line.count('{')
+                brace_count -= next_line.count('}')
+                i += 1
+            
+            # After this loop, if brace_count == 0, we got a complete method
+            # If not, it's incomplete and we discard it.
+            if brace_count == 0:
+                # Complete method, keep it
+                output_lines.extend(method_lines)
+            else:
+                # Incomplete method, skip it
+                pass  # do nothing, effectively removing it
+            
+        else:
+            # Not a method start, just a normal line. Keep it as is.
+            output_lines.append(line)
+            i += 1
+    
+    return "\n".join(output_lines)
+
 class Defects4jDataset(CodeDataset):
     def __init__(self, 
                  repair_data_path, 
@@ -125,7 +178,7 @@ class Defects4jDataset(CodeDataset):
         file_name = bug_id + ".java"
         example_bug, example_fix = Defects4jDataset.pick_smallest_example_fix(self.clean_dataset, file_name, only_same=self.only_same)
         prompt = self.used_prompt.format(example_bug=example_bug, example_fix=example_fix, bug=self.problems[bug_id]['buggy'])
-        return prompt
+        return prompt, self.problems[bug_id]['buggy']
         
         
     def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
