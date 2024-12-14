@@ -101,7 +101,7 @@ class Defects4jDataset(CodeDataset):
         with open(repair_data_path, "r") as f:
             self.problems = json.JSONDecoder(object_pairs_hook=collections.OrderedDict).decode(f.read())
         self.clean_dataset = Defects4jDataset.clean_parse_d4j(self.problems)
-        self.index = list(self.problems.keys())
+        self.index = list(sorted(self.problems.keys()))
         
         self.metadata = dict()
         for bug_id in self.index:
@@ -309,7 +309,7 @@ class Defects4jDataset(CodeDataset):
 
     # picking an example fix pairs from a project
     @staticmethod
-    def pick_smallest_example_fix(bugs, current_bug, only_same=False):
+    def pick_smallest_example_fix(bugs, current_bug, only_same=True):
         def _get_relevant_bugs(bugs, current_bug, only_same):
             potential_pairs = []
             project = current_bug.split("-")[0]

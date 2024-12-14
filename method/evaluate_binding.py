@@ -31,6 +31,27 @@ LOAD = 1
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 
+def compute_hit_line(important_tokens: list, selected_tokens: list):
+    """
+    Compute hit rate given the ground truth tokens and selected tokens.
+    ---
+    Args:
+        important_tokens: List[List]. important_token_info[key] returned by utils.get_important_token_pos
+        selected_tokens: List
+    Return:
+        Hit rate
+    """
+    selected_tokens = set(selected_tokens)
+    result = 0
+    for line in important_tokens:
+        line_hit = True
+        for token in line:
+            if token not in selected_tokens:
+                line_hit = False
+                break
+        result += line_hit
+    return result / len(important_tokens) 
+
 def compute_hit(important_tokens: list, selected_tokens: list):
     """
     Compute hit rate given the ground truth tokens and selected tokens.
@@ -106,7 +127,7 @@ def evaluate_binding(data,
                 
             tokenized_info = {"input_ids": torch.tensor(data[key]['token_output']).reshape(1, -1)[:, tail_truncate:], 
                             "attention_mask": torch.tensor([1 for i in range(len(data[key]['token_output']))]).reshape(1, -1)
-                            }
+            }
             #pred_profiler.append(copy.deepcopy(tokenized_info))
             with torch.inference_mode():
                 # If transformer.__version__ == v4.45.1, directly import it from transformers.cache_utils 
@@ -178,9 +199,8 @@ def main(
     max_profile_token_length = config_dict["task_config"]["max_profile_token_length"]
     extract_code = config_dict["task_config"]["extract_code"]
     collect_type = config_dict["task_config"]['collect_type']
-    mode = config_dict["task_config"]['mode']
     assert collect_type in ["attention", "hidden"]
-    assert mode in ["lbl", "sae"]
+    assert mode in ["lbl", "sae", "uncertainty"]
     
     cache_dir = None
     if "HF_HOME" in config_dict["system_setting"]:
@@ -195,43 +215,8 @@ def main(
 
     # ===== Load Data =====
     data = utils.load_shelve(data_path)
+    tokenizer = utils.load_tokenizer(model_name)
     recorder = None
-    if before_cache_save_folder is not None:
-        dataset_identifier = os.path.basename(data_path).split(".")[0]
-        model_identifier = model_name.split("/")[-1]
-        before_cache_save_path = os.path.join(before_cache_save_folder, f"{model_identifier}_{mode}_{collect_type}_extract_code{extract_code}_{dataset_identifier}_before_cache.pt")
-        if os.path.exists(before_cache_save_path):
-            before_info = torch.load(before_cache_save_path)
-            before_dict = before_info["before_dict"]
-            first_token_info_dict = before_info["first_token_info_dict"]
-            tokenizer = utils.load_tokenizer(model_name)
-        else:
-            before_dict = None
-            first_token_info_dict = None
-            # ===== Load Model =====
-            model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
-            if collect_type == "attention":
-                recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
-            elif collect_type == "hidden":
-                recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain")
-    else:
-        before_cache_save_path = None
-        before_dict = None
-        first_token_info_dict = None
-
-        # ===== Load Model =====
-        model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
-        if collect_type == "attention":
-            recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
-        elif collect_type == "hidden":
-            recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
-    
-    #if task.lower() == "defects4j":
-    #    data_path = config_dict["task_config"]["repair_data_path"]
-    #    loc_folder = config_dict["task_config"]["repair_loc_folder"]
-    #    defects4j_path = config_dict["system_setting"]['DEFECTS4J_PATH']
-    #    java_path = config_dict["system_setting"]['JAVA_PATH']
-    #    dataset = defects4j.Defects4jDataset(data_path, loc_folder, defects4j_path, java_home=java_path)
 
     # ===== Obtain task specific data info =====
     with open(important_label_path, "r") as ifile:
@@ -252,103 +237,152 @@ def main(
             continue
         evaluate_key_list.append(key)
 
-    # ==== Begin collecting attention scores ====
-    if mode == "lbl":
-        detection_model = detect_model.LBLRegression.load(detection_model_path)
-    elif mode == "sae":
-        detection_model = detect_model.EncoderClassifier.load(detection_model_path)
-    #lbl_model.load(lbl_model_path)
-    
-    score, counter, first_result, oom_keys, before_dict_1, first_token_info_dict_1 = \
-    evaluate_binding(data, 
-                    evaluate_key_list, 
-                    important_token_info, 
-                    recorder, 
-                    tokenizer,
-                    detection_model, 
-                    language, 
-                    layer,
-                    max_profile_token_length=max_profile_token_length,
-                    extract_code=extract_code,
-                    before_act_dict=before_dict,
-                    first_token_info_dict=first_token_info_dict
-                    )
-    
-    second_result = dict()
-    before_dict_2 = dict()
-    first_token_info_dict_2 = dict()
-    if len(oom_keys) > 0:
-        logger.info("Begin fallback inference for OOM data points")
-        del recorder
-        del model
-        time.sleep(3)
-        gc.collect()
-        torch.cuda.empty_cache()
-        model, tokenizer = utils.load_opensource_model(**FALLBACK_ARGS)
-        if collect_type == "attention":
-            recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
-        elif collect_type == "hidden":
-            recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
-        score, counter, second_result, oom_keys, before_dict_2, first_token_info_dict_2 = \
-            evaluate_binding(data, 
-                            oom_keys, 
-                            important_token_info, 
-                            recorder, 
-                            tokenizer,
-                            detection_model, 
-                            language, 
-                            layer,
-                            score=score,
-                            counter=counter,
-                            max_profile_token_length=max_profile_token_length,
-                            extract_code=extract_code,
-                            before_act_dict=before_dict,
-                            first_token_info_dict=first_token_info_dict
+    if mode != "uncertainty":
+        if before_cache_save_folder is not None:
+            dataset_identifier = os.path.basename(data_path).split(".")[0]
+            model_identifier = model_name.split("/")[-1]
+            before_cache_save_path = os.path.join(before_cache_save_folder, f"{model_identifier}_{mode}_{collect_type}_extract_code{extract_code}_{dataset_identifier}_before_cache.pt")
+            if os.path.exists(before_cache_save_path):
+                before_info = torch.load(before_cache_save_path)
+                before_dict = before_info["before_dict"]
+                first_token_info_dict = before_info["first_token_info_dict"]
+            else:
+                before_dict = None
+                first_token_info_dict = None
+                # ===== Load Model =====
+                model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
+                if collect_type == "attention":
+                    recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
+                elif collect_type == "hidden":
+                    recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain")
+        else:
+            before_cache_save_path = None
+            before_dict = None
+            first_token_info_dict = None
+
+            # ===== Load Model =====
+            model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
+            if collect_type == "attention":
+                recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
+            elif collect_type == "hidden":
+                recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
+        
+        #if task.lower() == "defects4j":
+        #    data_path = config_dict["task_config"]["repair_data_path"]
+        #    loc_folder = config_dict["task_config"]["repair_loc_folder"]
+        #    defects4j_path = config_dict["system_setting"]['DEFECTS4J_PATH']
+        #    java_path = config_dict["system_setting"]['JAVA_PATH']
+        #    dataset = defects4j.Defects4jDataset(data_path, loc_folder, defects4j_path, java_home=java_path)
+
+        # ==== Begin collecting attention scores ====
+        if mode == "lbl":
+            detection_model = detect_model.LBLRegression.load(detection_model_path)
+        elif mode == "sae":
+            detection_model = detect_model.EncoderClassifier.load(detection_model_path)
+            
+        #lbl_model.load(lbl_model_path)
+        
+        score, counter, first_result, oom_keys, before_dict_1, first_token_info_dict_1 = \
+        evaluate_binding(data, 
+                        evaluate_key_list, 
+                        important_token_info, 
+                        recorder, 
+                        tokenizer,
+                        detection_model, 
+                        language, 
+                        layer,
+                        max_profile_token_length=max_profile_token_length,
+                        extract_code=extract_code,
+                        before_act_dict=before_dict,
+                        first_token_info_dict=first_token_info_dict
                         )
+        
+        second_result = dict()
+        before_dict_2 = dict()
+        first_token_info_dict_2 = dict()
         if len(oom_keys) > 0:
-            logger.error("OOM error still exists after fallback inference. Ignore them.")
-            logger.error("OOM keys: {}".format(oom_keys))
-    
-    #topk_recorder = {"top5": score / counter}
-    result = {**first_result, **second_result}
-    if before_dict is None and before_cache_save_path is not None:
-        before_dict = {**before_dict_1, **before_dict_2}
-        first_token_info_dict = {**first_token_info_dict_1, **first_token_info_dict_2}
-        torch.save({"before_dict": before_dict, "first_token_info_dict": first_token_info_dict}, before_cache_save_path)
+            logger.info("Begin fallback inference for OOM data points")
+            del recorder
+            del model
+            time.sleep(3)
+            gc.collect()
+            torch.cuda.empty_cache()
+            model, tokenizer = utils.load_opensource_model(**FALLBACK_ARGS)
+            if collect_type == "attention":
+                recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
+            elif collect_type == "hidden":
+                recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
+            score, counter, second_result, oom_keys, before_dict_2, first_token_info_dict_2 = \
+                evaluate_binding(data, 
+                                oom_keys, 
+                                important_token_info, 
+                                recorder, 
+                                tokenizer,
+                                detection_model, 
+                                language, 
+                                layer,
+                                score=score,
+                                counter=counter,
+                                max_profile_token_length=max_profile_token_length,
+                                extract_code=extract_code,
+                                before_act_dict=before_dict,
+                                first_token_info_dict=first_token_info_dict
+                            )
+            if len(oom_keys) > 0:
+                logger.error("OOM error still exists after fallback inference. Ignore them.")
+                logger.error("OOM keys: {}".format(oom_keys))
+        
+        #topk_recorder = {"top5": score / counter}
+        result = {**first_result, **second_result}
+        if before_dict is None and before_cache_save_path is not None:
+            before_dict = {**before_dict_1, **before_dict_2}
+            first_token_info_dict = {**first_token_info_dict_1, **first_token_info_dict_2}
+            torch.save({"before_dict": before_dict, "first_token_info_dict": first_token_info_dict}, before_cache_save_path)
+        else:
+            del before_dict_1
+            del before_dict_2
     else:
-        del before_dict_1
-        del before_dict_2
-    
-    
-    topk_recorder = {"hit_rate": {}, "recall": {}}
+        result = dict()
+        oom_keys = dict()
+        
+    topk_recorder = {"hit_rate": {}, "recall": {}, "hit_line_rate": {}}
     for topk_iter in [1, 3, 5, 10]:
         hit_score = 0
+        hit_line_score = 0
         recall_score = 0
         counter = 0
-        for key in result:
-            recorded_result = result[key]
-            rank_per_line = recorded_result[1][:topk_iter]
+        for key in evaluate_key_list:
             if extract_code:
                 code_blocks_info = None
             else:
                 code_blocks_info = [[0, len(data[key]["str_output"])]]
             candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
-            selected_token = set()
-            for line in rank_per_line:
-                selected_token = selected_token.union(set(candidate_tokens[line]))
+            if mode != "uncertainty":
+                recorded_result = result[key]
+                rank_per_line = recorded_result[1][:topk_iter]
+                selected_token = set()
+                for line in rank_per_line:
+                    selected_token = selected_token.union(set(candidate_tokens[line]))
+            else:
+                selected_token = utils.obtain_topk_tokens_by_prob(data, candidate_tokens, key, topk_iter, np.mean)
+                result[key] = [None, list(selected_token)]
             
             hit_score += compute_hit(important_token_info[key], selected_token)
+            hit_line_score += compute_hit_line(important_token_info[key], selected_token)
             recall_score += compute_recall(important_token_info[key], selected_token)
             
             counter += 1
         topk_recorder['hit_rate']["top{}".format(topk_iter)] = hit_score / counter
         topk_recorder['recall']["top{}".format(topk_iter)] = recall_score / counter
+        topk_recorder['hit_line_rate']["top{}".format(topk_iter)] = hit_line_score / counter
     
-    for key in result:
-        if isinstance(result[key][0], torch.Tensor):
-            result[key][0] = result[key][0].tolist()
-        if isinstance(result[key][1], torch.Tensor):
-            result[key][1] = result[key][1].tolist()
+    if mode != "uncertainty":
+        for key in result:
+            if isinstance(result[key][0], torch.Tensor):
+                result[key][0] = result[key][0].tolist()
+            if isinstance(result[key][1], torch.Tensor):
+                result[key][1] = result[key][1].tolist()
+        
     
     with open(result_output_path, "w") as ofile:
         json.dump({"result": topk_recorder, "pred_result": result, "OOM_keys": oom_keys}, ofile)

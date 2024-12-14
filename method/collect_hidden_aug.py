@@ -39,6 +39,9 @@ def find_contrastive_index(correct_lines, buggy_lines):
     """
     result = []
     # Initialize the SequenceMatcher
+    correct_lines = [line.strip() for line in correct_lines]
+    buggy_lines = [line.strip() for line in buggy_lines]
+    
     matcher = difflib.SequenceMatcher(None, correct_lines, buggy_lines)
 
     # Get the opcodes which describe how to transform correct_lines into buggy_lines
@@ -195,27 +198,46 @@ class HumanEvalPack:
         }
         return item
 
-class CommitPack:
+class RepairData:
     def __init__(self,
                  dataset_name: str="chargoddard/commitpack-ft-instruct-rated",
                  feature_key_list: list=['Python', 'JavaScript', 'Java', 'C++', 'Rust', 'Ruby', 'C'],
                  split_token="\n",
                  original_label=1,
                  mutated_label=2,
+                 max_token_length=4096,
+                 tokenizer = None,
                 ):
         self.feature_key_list = feature_key_list
         self.split_token = split_token
         self.data = []
         self.original_label = original_label
         self.mutated_label = mutated_label
+        self.data_type = None
 
-        ds = load_dataset("chargoddard/commitpack-ft-instruct-rated", "best_rated")["train"]
-        self.data = []
-        feature_key_list = set(feature_key_list)
-        for item in ds:
-            if item['language'] not in feature_key_list or "```" not in item["input"]:
-                continue
-            else:
+        if "commitpack" in dataset_name:
+            self.data_type == "commit"
+            ds = load_dataset(dataset_name, "best_rated")["train"]
+            self.data = []
+            feature_key_list = set(feature_key_list)
+            for item in ds:
+                if item['language'] not in feature_key_list or "```" not in item["input"]:
+                    continue
+                if tokenizer is not None:
+                    token_list = tokenizer(self.wrap_input(item, split_token))["input_ids"]
+                    if len(token_list) > max_token_length:
+                        continue
+                else:
+                    self.data.append(item)
+        else:
+            # DebugBench
+            ds = load_dataset(dataset_name, "test")["test"]
+            self.data_type == "debug"
+            for item in ds:
+                if tokenizer is not None:
+                    token_list = tokenizer(self.wrap_input(item, split_token))["input_ids"]
+                    if len(token_list) > max_token_length:
+                        continue
                 self.data.append(item)
     
         self.processed_data = []
@@ -233,11 +255,23 @@ class CommitPack:
     def __len__(self):
         return len(self.processed_data)
 
+    def wrap_input(self, dp, split_token):
+        if self.data_type == "commit":
+            problem_description = dp["instruction"] + split_token + dp["input"] + split_token
+            code_description = "The Answer is: \n"
+            correct_code = remove_empty_lines(dp['output'])
+            buggy_code = remove_empty_lines(dp['input'])
+        else:
+            problem_description = dp["question"] + split_token + f"Following is the buggy code:{split_token}"
+            code_description = f"Please genearte the correct code: {split_token}"
+            buggy_code = remove_empty_lines(dp['buggy_code'])
+            correct_code = remove_empty_lines(dp['solution'])
+        return problem_description, code_description, correct_code, buggy_code
+            
     def process_single(self, dp, split_token="\n", original_label=1, mutated_label=2):
-        problem_description = dp["instruction"] + split_token + dp["input"]
-        code_description = "The Answer is"
-        correct_code = remove_empty_lines(dp['output'])
-        buggy_code = remove_empty_lines(dp['input'])
+        problem_description, code_description, correct_code, buggy_code = self.wrap_input(dp, split_token)
+            
+            
         if not correct_code.endswith("\n"):
             correct_code += "\n"
 
@@ -1113,17 +1147,21 @@ def main(
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
     recorder = extract_util.TransHookRecorder({hidden_layer: {"return_first": True}}, model, mode="plain")
 
-    if "tracer" in dataset_name:
+    if "tracer" in dataset_name.lower():
         aug_times = 0
         logger.info("Using AugExecCodeData for Tracer dataset")
         data = AugExecCodeData(
             data_path=dataset_name,
             tokenizer=tokenizer,
         )
-    elif "humanevalpack" in dataset_name:
+    elif "humanevalpack" in dataset_name.lower():
         aug_times = 0
         logger.info("Using HumanEvalPack as dataset")
         data = HumanEvalPack(dataset_name=dataset_name, feature_key_list=feature_key_list)
+    elif "commitpack" in dataset_name.lower() or "debugbench" in dataset_name.lower():
+        aug_times = 0
+        logger.info(f"Using {dataset_name} as dataset")
+        data = RepairData(dataset_name=dataset_name, feature_key_list=feature_key_list)
     else:
         aug_times = len(mutation_prop)
         if dataset_path_list is not None:

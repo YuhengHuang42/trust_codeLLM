@@ -8,27 +8,31 @@ import tqdm
 import copy
 import shelve
 import os
+from transformers import GenerationConfig
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 CODE_NOT_FOUND_FLAG = "NO_CODE"
 
-# We by default use parallel for LLM loading based on all available GPUS.
-# Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
-def evaluate(llm, tokenizer, dataset, generate_config, ans_recored, iter_list=None):
+global_eof_stops = ['// Buggy Function', '// Fixed Function', '# Buggy Function', '# Fixed Function',
+                    '/* Buggy Function */', '/* Fixed Function */', '<|endoftext|>']
+    
+def evaluate(llm, tokenizer, dataset, generate_config, ans_recored, iter_list=None, ext_gen_config=None):
     import utility.utils as utils
     generate_config = copy.deepcopy(generate_config)
     #prompt = generate_config.pop("prompt")
     if iter_list == None:
         iter_list = range(len(dataset))
-
-    for idx in iter_list:
+    
+    for idx in tqdm.tqdm(iter_list):
         prompt = dataset.get_prompt(dataset.index[idx])
         generate_result = utils.generate_and_record(
             llm,
             tokenizer,
             prompt,
-            generate_config=generate_config
+            generate_config=generate_config,
+            extra_generation_config=ext_gen_config
         )
         # Evaluate the code
         code = generate_result['str_output']
@@ -64,10 +68,11 @@ def main(
         cache_dir = None
     import utility.utils as utils
     from task.defect4j import Defects4jDataset
+    from task.quixbug import QuixbugDataset
     data_path = config_dict["task_config"]["repair_data_path"]
     loc_folder = config_dict["task_config"]["repair_loc_folder"]
-    defects4j_path = config_dict["system_setting"]['DEFECTS4J_PATH']
-    java_path = config_dict["system_setting"]['JAVA_PATH']
+    defects4j_path = config_dict["system_setting"].get('DEFECTS4J_PATH', None)
+    java_path = config_dict["system_setting"].get('JAVA_PATH', None)
 
     
     ## Load model
@@ -76,20 +81,27 @@ def main(
     generate_config = config_dict["llm_config"]["generate_config"]
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
     
-    if task == "defects4j":
+    if task.lower() == "defects4j":
         assert "split" in config_dict["task_config"]
         dataset = Defects4jDataset(data_path, loc_folder, defects4j_path, java_home=java_path)
         already_saved_length, saved_path = utils.load_shelve_and_resume(os.path.dirname(str(output_path)))
-        if already_saved_length == 0:
-            ans_recored = shelve.open(str(output_path))
-            iter_list = None
-        else:
-            logger.warning(f"Saved data already exists in {os.path.dirname(str(output_path))}. Resume from it. Start from {already_saved_length}.")
-            logger.warning(f"Please make sure this is expected. We anticipate there is only one file under a folder")
-            ans_recored = shelve.open(str(saved_path))
-            iter_list = range(already_saved_length, len(dataset))
-        evaluate(model, tokenizer, dataset, generate_config, ans_recored, iter_list)
-        ans_recored.close()
+        generation_config = GenerationConfig.from_pretrained(model_name,)
+        generation_config.stop_strings = global_eof_stops + ["// Provide a fix for the buggy function"]
+    elif task.lower() == "quixbug":
+        dataset = QuixbugDataset(data_path, "/tmp/quixbug", loc_folder)
+        already_saved_length, saved_path = utils.load_shelve_and_resume(os.path.dirname(str(output_path)))
+        generation_config = GenerationConfig.from_pretrained(model_name,)
+        generation_config.stop_strings = global_eof_stops + ["# Provide a fix for the buggy function"]
+    if already_saved_length == 0:
+        ans_recored = shelve.open(str(output_path))
+        iter_list = None
+    else:
+        logger.warning(f"Saved data already exists in {os.path.dirname(str(output_path))}. Resume from it. Start from {already_saved_length}.")
+        logger.warning(f"Please make sure this is expected. We anticipate there is only one file under a folder")
+        ans_recored = shelve.open(str(saved_path))
+        iter_list = range(already_saved_length, len(dataset))
+    evaluate(model, tokenizer, dataset, generate_config, ans_recored, iter_list, ext_gen_config=generation_config)
+    ans_recored.close()
     
     end = time.time()
     logger.info(f"Total time: {end-start}")

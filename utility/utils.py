@@ -64,7 +64,7 @@ def aggregate_scores(token_list, scores, sep=["\n", "\n\n", "\n\n\n"]):
             aggregate_score.append(scores[idx])
     return result
 
-def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tokens": 600}):
+def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tokens": 600}, extra_generation_config=None):
     # https://huggingface.co/docs/transformers/v4.44.2/en/main_classes/text_generation#transformers.GenerationMixin.generate
     # https://huggingface.co/docs/transformers/v4.44.2/en/main_classes/text_generation#transformers.GenerationConfig
     
@@ -77,7 +77,9 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
         output = llm.generate(
             **inputs,
             pad_token_id=tokenizer.eos_token_id,
-            **generate_config
+            tokenizer=tokenizer,
+            **generate_config,
+            generation_config=extra_generation_config
         )
     if "return_dict_in_generate" in generate_config:
         seq = output["sequences"].cpu()

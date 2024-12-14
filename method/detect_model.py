@@ -328,7 +328,16 @@ class RiskPredictor(ABC):
     
 
 class RankNet(nn.Module):
-    def __init__(self, n_inputs, layer_num, hidden_size, device="cuda", lr=1e-4, num_epochs=20, batch_size=4):
+    def __init__(self, 
+                 n_inputs, 
+                 layer_num, 
+                 hidden_size,
+                 enable_attn=False,
+                 code_num=32, 
+                 device="cuda", 
+                 lr=1e-4, 
+                 num_epochs=20, 
+                 batch_size=4):
         super(RankNet, self).__init__()
         self.n_inputs = n_inputs
         self.layer_num = layer_num
@@ -340,6 +349,17 @@ class RankNet(nn.Module):
         blocks.append(nn.ReLU(inplace=True))
         blocks.append(nn.Linear(hidden_size, 1))
         self.blocks = nn.Sequential(*blocks)
+        self.enable_attn = enable_attn
+        if enable_attn:
+            self.attention = ScaledDotProductAttention(hidden_size)
+            self.V = torch.nn.Parameter(torch.randn(code_num, hidden_size))
+            self.K = torch.nn.Parameter(torch.randn(code_num, hidden_size))
+            self.output_proj = nn.Bilinear(hidden_size, hidden_size, hidden_size)
+        else:
+            self.attention = None
+            self.V = None
+            self.K = None
+            self.output_proj = None
         
         self.sigmoid = nn.Sigmoid()
         
@@ -350,8 +370,23 @@ class RankNet(nn.Module):
         self.to(device)
         
 
-    def forward(self, input_1):
-        return torch.squeeze(self.sigmoid(self.blocks(input_1)), dim=-1)
+    def forward(self, input_1, first_token=None):
+        if self.enable_attn:
+            assert first_token is not None
+            first_token = first_token.to(self.device)
+            if len(first_token.shape) == 1:
+                first_token = first_token.unsqueeze(0)
+            if len(input_1.shape) == 2:
+                input_1 = input_1.unsqueeze(0)
+            attn_output, attn_weights = self.attention(first_token, self.K, self.V)
+            attn_output = attn_output.reshape(-1, 1, self.hidden_size)
+            repeat_counts = torch.tensor([input_1.shape[1]]).to(self.device)
+            attn_output = torch.repeat_interleave(attn_output, repeat_counts, dim=1)
+            output = self.output_proj(input_1, attn_output)
+            output = output + input_1
+        else:
+            output = input_1
+        return torch.squeeze(self.sigmoid(self.blocks(output)), dim=-1)
     
     def fit(self, train_x, train_y, candidate_token_dict):
         dataset = DictDataset(train_x, train_y, candidate_token_dict)
@@ -399,17 +434,18 @@ class RankNet(nn.Module):
             return padded_x, padded_rank_y
         return collate_fn
     
-    def predict(self, x):
+    def predict(self, x, first_token=None):
         with torch.inference_mode():
             x = x.to(self.device)
-            y = self(x).cpu()
+            y = self(x, first_token=first_token).cpu()
+            y = y.squeeze(0)
             ranking = torch.sort(y, dim=-1, descending=True).indices.tolist()
             return ranking, y
     
-    def predict_proba(self, x):
+    def predict_proba(self, first_token, x):
         x = convert_to_torch_tensor(x)
         x = x.to(self.device)
-        ranking, y = self.predict(x)
+        ranking, y = self.predict(x, first_token=first_token)
         return ranking, y
     
 
@@ -422,13 +458,15 @@ class RankNet(nn.Module):
         lr = loaded_info["meta"]["lr"]
         num_epochs = loaded_info["meta"]["num_epochs"]
         batch_size = loaded_info["meta"]["batch_size"]
+        enable_attn = loaded_info["meta"].get("enable_attn", False)
         parameter_dict = {
             "n_inputs": n_inputs,
             "layer_num": layer_num,
             "hidden_size": hidden_size,
             "lr": lr,
             "num_epochs": num_epochs,
-            "batch_size": batch_size
+            "batch_size": batch_size,
+            "enable_attn": enable_attn
         }
         if device is not None:
             parameter_dict["device"] = device
@@ -445,7 +483,8 @@ class RankNet(nn.Module):
                 "hidden_size": self.hidden_size,
                 "lr": self.lr,
                 "num_epochs": self.num_epochs,
-                "batch_size": self.batch_size
+                "batch_size": self.batch_size,
+                "enable_attn": self.enable_attn
             },
             "state_dict": self.state_dict()
         }, path)
@@ -680,7 +719,8 @@ class EncoderClassifier(RiskPredictor):
             self.hidden_first = layer_info.cpu()[input_token_length]
         else:
             self.hidden_first = first_token
-        self.hidden_first, _ = self.encoder.encode(self.hidden_first)
+        with torch.inference_mode():
+            self.hidden_first, _ = self.encoder.encode(self.hidden_first)
         latent, before_enc = collect_hidden_states(layer_info, input_token_length, candidate_tokens, self.encoder, before_enc=x)
         latent = latent.numpy().astype(np.float32)
         self.cache = before_enc.numpy().astype(np.float32)
@@ -703,7 +743,7 @@ class EncoderClassifier(RiskPredictor):
             rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)
             rank_per_line = [i[1] for i in rank_per_line]
         elif self.model_type == "ranker":
-            rank_per_line, y = self.clf.predict_proba(latent)
+            rank_per_line, y = self.clf.predict_proba(self.hidden_first, latent)
         else:
             y = self.clf.predict_proba(latent)
             pred_result = y[:, 1]

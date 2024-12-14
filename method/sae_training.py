@@ -143,6 +143,8 @@ def training_one_epoch_contrastive(sae,
     for data_loader in data_loader_list:
         for idx, store_batch in enumerate(data_loader):
             original, mutated, original_index, mutated_index, additional_info = store_batch
+            original_index = original_index.int()
+            mutated_index = mutated_index.int()
             start_time = time.time()
             optimizer.zero_grad()
             if next_token_pred is False:
