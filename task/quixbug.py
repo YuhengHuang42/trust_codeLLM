@@ -134,11 +134,18 @@ class QuixbugDatasetPy(CodeDataset):
         assert (len(ret) == 40)  # should only be 40 buggy/fix pairs
         return ret
 
-    def get_prompt(self, file_name):
+    def get_prompt(self, idx):
         # file_name: 'Chart-1.java'
+        file_name = self.index[idx]
         example_bug, example_fix = pick_smallest_example_fix(self.clean_dataset, file_name)
         prompt = self.used_prompt.format(example_bug=example_bug, example_fix=example_fix, bug=self.clean_dataset[file_name]['buggy'])
         return prompt, self.clean_dataset[file_name]['buggy']
+    
+    def get_buggy_code(self, idx):
+        return self.clean_dataset[self.index[idx]]['buggy']
+
+    def get_fix_code(self, idx):
+        return self.clean_dataset[self.index[idx]]['fix']
     
     def check_result(self, generated_code, idx):
         file_name = self.index[idx]
@@ -238,11 +245,15 @@ class QuixbugDatasetJa(CodeDataset):
         assert (len(ret) == 40)  # should only be 40 buggy/fix pairs
         return ret
 
-    def get_prompt(self, file_name):
+    def get_prompt(self, idx):
         # file_name: 'Chart-1.java'
+        file_name = self.index[idx]
         example_bug, example_fix = pick_smallest_example_fix(self.clean_dataset, file_name)
         prompt = self.used_prompt.format(example_bug=example_bug, example_fix=example_fix, bug=self.clean_dataset[file_name]['buggy'])
         return prompt, self.clean_dataset[file_name]['buggy']
+    
+    def get_buggy_code(self, idx):
+        return self.clean_dataset[self.index[idx]]['buggy']
     
     def check_result(self, generated_code, idx):
         file_name = self.index[idx]

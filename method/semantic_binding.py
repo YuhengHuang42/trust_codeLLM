@@ -155,6 +155,7 @@ def clean_data(shelve_data):
     for key in all_keys:
         if len(shelve_data[key]['gen_probs'][0]) <= 1:
             shelve_data.pop(key)
+            continue
         if shelve_data[key]['input_length'] >= HARD_TOKEN_LIMIT:
             shelve_data.pop(key)
     return shelve_data
@@ -182,36 +183,6 @@ def get_error_line_info_from_completion(shelve_data, upper_bound_abs_num=5):
 
 '''
 
-def load_gt(data_source, dataset_list, data_path_list, important_label_path_list, tokenizer):
-    data_line_token_pair = [[], [], []]
-    for idx, source in enumerate(data_source):
-        important_label_path = important_label_path_list[idx]
-        data_path = data_path_list[idx]
-        dataset = dataset_list[idx]
-        if source == "shelve":
-            data = utils.load_shelve(data_path)
-            data = clean_data(data)
-            if dataset == "safim":
-                error_line_info, pop_key = get_error_line_info_from_completion(data)
-                for key in pop_key:
-                    data.pop(key)
-            else:
-                with open(important_label_path, "r") as ifile:
-                    error_line_info = json.load(ifile)
-        data_line_token_pair[0].append(data)
-        data_line_token_pair[1].append(error_line_info)
-        target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
-        data_line_token_pair[2].append(important_token_info)
-    return data_line_token_pair
-
-def clean_data(shelve_data):
-    all_keys = list(shelve_data.keys())
-    for key in all_keys:
-        if len(shelve_data[key]['gen_probs'][0]) <= 1:
-            shelve_data.pop(key)
-        if shelve_data[key]['input_length'] >= HARD_TOKEN_LIMIT:
-            shelve_data.pop(key)
-    return shelve_data
     
 def load_gt(data_source, dataset_list, data_path_list, important_label_path_list, tokenizer):
     data_line_token_pair = [[], [], []]
@@ -229,6 +200,10 @@ def load_gt(data_source, dataset_list, data_path_list, important_label_path_list
             else:
                 with open(important_label_path, "r") as ifile:
                     error_line_info = json.load(ifile)
+        error_line_info_keys = list(error_line_info.keys())
+        for key in error_line_info_keys:
+            if key not in data:
+                error_line_info.pop(key)
         data_line_token_pair[0].append(data)
         data_line_token_pair[1].append(error_line_info)
         target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)

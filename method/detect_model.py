@@ -5,7 +5,6 @@ from sklearn.neural_network import MLPClassifier
 import joblib
 from sklearn import svm
 import torch
-import torch.nn as nn
 from sklearn.decomposition import TruncatedSVD
 from imblearn.over_sampling import SMOTE
 from torch.nn.utils.rnn import pad_sequence
@@ -100,7 +99,13 @@ def flat_data_dict(data_dict_x, data_dict_y):
             y[f"{dataset}_{key}"] = data_dict_y[dataset][key]
     return x, y
 """
-
+def LN(x: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mu = x.mean(dim=-1, keepdim=True)
+    x = x - mu
+    std = x.std(dim=-1, keepdim=True)
+    x = x / (std + eps)
+    return x, mu, std
+    
 def convert_to_torch_tensor(array):
     if isinstance(array, np.ndarray):
         return torch.from_numpy(array)
@@ -224,7 +229,7 @@ class ScaledDotProductAttention(nn.Module):
         # Weighted sum of values
         output = torch.matmul(attn_weights, V)
         return output, attn_weights
-        
+          
 class AttentionModule(nn.Module):
     def __init__(self, 
                  code_num, 
@@ -250,13 +255,6 @@ class AttentionModule(nn.Module):
             self.input_proj = nn.Linear(hidden_dim, hidden_dim)
         else:
             self.input_proj = None
-
-    def LN(self, x: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mu = x.mean(dim=-1, keepdim=True)
-        x = x - mu
-        std = x.std(dim=-1, keepdim=True)
-        x = x / (std + eps)
-        return x, mu, std
         
     def forward(self, context_vec, X, repeat_counts=None):
         # X: M * N
@@ -267,7 +265,7 @@ class AttentionModule(nn.Module):
         
         # Project the output back to d_model (optional, for integration into larger models)
         if self.ln is True:
-            X, mu, std = self.LN(X)
+            X, mu, std = LN(X)
         if self.input_proj is None:
             output = X
         else:
@@ -327,13 +325,76 @@ class RiskPredictor(ABC):
         return NotImplemented
     
 
+# Reference: https://github.com/Cadene/block.bootstrap.pytorch/blob/e938e9e269d2ec67499db327b903edbe821fed5f/block/models/networks/fusions/fusions.py
+class MLB(nn.Module):
+    def __init__(self,
+            n_inputs,
+            hidden_dim=1200,
+            output_dim=1,
+            activ_input='relu',
+            activ_output='relu',
+            normalize=False,
+            dropout_input=0.,
+            dropout_pre_lin=0.,
+            dropout_output=0.):
+        super(MLB, self).__init__()
+        self.n_inputs = n_inputs
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.activ_input = activ_input
+        self.activ_output = activ_output
+        self.normalize = normalize
+        self.dropout_input = dropout_input
+        self.dropout_pre_lin = dropout_pre_lin
+        self.dropout_output = dropout_output
+        # Modules
+        self.linear0 = nn.Linear(n_inputs, hidden_dim)
+        self.linear1 = nn.Linear(n_inputs, hidden_dim)
+        self.linear_out = nn.Linear(hidden_dim, output_dim)
+        self.n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def forward(self, input_x):
+        x, first_token = input_x
+        x0 = self.linear0(x)
+        x1 = self.linear1(first_token)
+
+        if self.activ_input:
+            x0 = getattr(F, self.activ_input)(x0)
+            x1 = getattr(F, self.activ_input)(x1)
+
+        if self.dropout_input > 0:
+            x0 = F.dropout(x0, p=self.dropout_input, training=self.training)
+            x1 = F.dropout(x1, p=self.dropout_input, training=self.training)
+
+        z = x0 * x1
+
+        if self.normalize:
+            z = torch.sqrt(F.relu(z)) - torch.sqrt(F.relu(-z))
+            z = F.normalize(z,p=2)
+
+        if self.dropout_pre_lin > 0:
+            z = F.dropout(z, p=self.dropout_pre_lin, training=self.training)
+
+        z = self.linear_out(z)
+
+        if self.activ_output:
+            z = getattr(F, self.activ_output)(z)
+
+        if self.dropout_output > 0:
+            z = F.dropout(z, p=self.dropout_output, training=self.training)
+        return z
+    
 class RankNet(nn.Module):
     def __init__(self, 
                  n_inputs, 
                  layer_num, 
                  hidden_size,
+                 enable_ln=False,
                  enable_attn=False,
-                 code_num=32, 
+                 enable_res=False,
+                 enable_mlb=False,
+                 code_num=32,
+                 drop_out_rate=0, 
                  device="cuda", 
                  lr=1e-4, 
                  num_epochs=20, 
@@ -342,24 +403,60 @@ class RankNet(nn.Module):
         self.n_inputs = n_inputs
         self.layer_num = layer_num
         self.hidden_size = hidden_size
-        blocks = [nn.Linear(n_inputs, hidden_size)]
-        for _ in range(layer_num-1):
-            blocks.append(nn.ReLU(inplace=True))
-            blocks.append(nn.Linear(hidden_size, hidden_size))
-        blocks.append(nn.ReLU(inplace=True))
-        blocks.append(nn.Linear(hidden_size, 1))
-        self.blocks = nn.Sequential(*blocks)
         self.enable_attn = enable_attn
+        self.enable_res = enable_res
+        self.enable_mlb = enable_mlb
+        self.res = None
+        self.attention = None
+        self.V = None
+        self.K = None
+        self.output_proj = None
+        self.drop_out_rate = drop_out_rate
+        self.enable_ln = enable_ln
         if enable_attn:
             self.attention = ScaledDotProductAttention(hidden_size)
             self.V = torch.nn.Parameter(torch.randn(code_num, hidden_size))
             self.K = torch.nn.Parameter(torch.randn(code_num, hidden_size))
             self.output_proj = nn.Bilinear(hidden_size, hidden_size, hidden_size)
+            
+            #self.attention = LearnableAttention(n_inputs, hidden_size)
+            #blocks = [nn.Linear(hidden_size, hidden_size)]
+            #for _ in range(layer_num-2):
+            #    blocks.append(nn.ReLU(inplace=True))
+            #    blocks.append(nn.Linear(hidden_size, hidden_size))
+            #blocks.append(nn.ReLU(inplace=True))
+            #blocks.append(nn.Linear(hidden_size, 1))
+            #self.blocks = nn.Sequential(*blocks)
+        elif enable_res:
+            self.res = nn.Sequential(*[nn.Linear(n_inputs, hidden_size), nn.ReLU(inplace=True)])
+            blocks = [nn.Linear(hidden_size, hidden_size)]
+            for _ in range(layer_num-2):
+                blocks.append(nn.ReLU(inplace=True))
+                blocks.append(nn.Linear(hidden_size, hidden_size))
+            blocks.append(nn.ReLU(inplace=True))
+            blocks.append(nn.Linear(hidden_size, 1))
+            self.blocks = nn.Sequential(*blocks)
+        elif enable_mlb:
+            blocks = [MLB(n_inputs, hidden_size, output_dim=hidden_size, dropout_pre_lin=self.drop_out_rate)]
+            for _ in range(layer_num-2):
+                blocks.append(nn.Linear(hidden_size, hidden_size))
+                blocks.append(nn.ReLU(inplace=True))
+            blocks.append(nn.Linear(hidden_size, 1))
+            self.blocks = nn.Sequential(*blocks)
         else:
-            self.attention = None
-            self.V = None
-            self.K = None
-            self.output_proj = None
+            blocks = [nn.Linear(n_inputs, hidden_size)]
+            for _ in range(layer_num-1):
+                blocks.append(nn.ReLU(inplace=True))
+                if self.drop_out_rate > 0:
+                    blocks.append(nn.Dropout(p=self.drop_out_rate))
+                blocks.append(nn.Linear(hidden_size, hidden_size))
+            blocks.append(nn.ReLU(inplace=True))
+            blocks.append(nn.Linear(hidden_size, 1))
+            self.blocks = nn.Sequential(*blocks)
+            #self.attention = None
+            #self.V = None
+            #self.K = None
+            #self.output_proj = None
         
         self.sigmoid = nn.Sigmoid()
         
@@ -371,6 +468,8 @@ class RankNet(nn.Module):
         
 
     def forward(self, input_1, first_token=None):
+        if self.enable_ln is True:
+            input_1, mu, std = LN(input_1)
         if self.enable_attn:
             assert first_token is not None
             first_token = first_token.to(self.device)
@@ -384,6 +483,14 @@ class RankNet(nn.Module):
             attn_output = torch.repeat_interleave(attn_output, repeat_counts, dim=1)
             output = self.output_proj(input_1, attn_output)
             output = output + input_1
+        elif self.enable_res:
+            first_proj = self.res(first_token)
+            # (1, hidden_size)
+            input_1 = self.res(input_1)
+            # (L,)
+            output = input_1 + first_proj
+        elif self.enable_mlb:
+            output = [input_1, first_token]
         else:
             output = input_1
         return torch.squeeze(self.sigmoid(self.blocks(output)), dim=-1)
@@ -437,6 +544,7 @@ class RankNet(nn.Module):
     def predict(self, x, first_token=None):
         with torch.inference_mode():
             x = x.to(self.device)
+            first_token = first_token.to(self.device)
             y = self(x, first_token=first_token).cpu()
             y = y.squeeze(0)
             ranking = torch.sort(y, dim=-1, descending=True).indices.tolist()
@@ -720,7 +828,7 @@ class EncoderClassifier(RiskPredictor):
         else:
             self.hidden_first = first_token
         with torch.inference_mode():
-            self.hidden_first, _ = self.encoder.encode(self.hidden_first)
+            hidden_first, _ = self.encoder.encode(self.hidden_first)
         latent, before_enc = collect_hidden_states(layer_info, input_token_length, candidate_tokens, self.encoder, before_enc=x)
         latent = latent.numpy().astype(np.float32)
         self.cache = before_enc.numpy().astype(np.float32)
@@ -738,15 +846,15 @@ class EncoderClassifier(RiskPredictor):
             else:
                 latent = self.dim_red.transform(latent)
         if self.model_type == "attn":
-            y = self.clf.predict_proba(self.hidden_first, latent)
-            pred_result = y[:, 1]
+            y = self.clf.predict_proba(hidden_first, latent)
+            pred_result = y[:, 1].tolist()
             rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)
             rank_per_line = [i[1] for i in rank_per_line]
         elif self.model_type == "ranker":
-            rank_per_line, y = self.clf.predict_proba(self.hidden_first, latent)
+            rank_per_line, y = self.clf.predict_proba(hidden_first, latent)
         else:
             y = self.clf.predict_proba(latent)
-            pred_result = y[:, 1]
+            pred_result = y[:, 1].tolist()
             rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)
             rank_per_line = [i[1] for i in rank_per_line]
     

@@ -391,9 +391,9 @@ def main(
     
     if mode != "uncertainty":
         for key in result:
-            if isinstance(result[key][0], torch.Tensor):
+            if isinstance(result[key][0], torch.Tensor) or isinstance(result[key][0], np.ndarray):
                 result[key][0] = result[key][0].tolist()
-            if isinstance(result[key][1], torch.Tensor):
+            if isinstance(result[key][1], torch.Tensor) or isinstance(result[key][1], np.ndarray):
                 result[key][1] = result[key][1].tolist()
         
     

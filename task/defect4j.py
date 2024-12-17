@@ -173,13 +173,19 @@ class Defects4jDataset(CodeDataset):
     def __getitem__(self, i):
         return self.problems[self.index[i]]
 
-    def get_prompt(self, bug_id):
+    def get_prompt(self, idx):
         # file_name: 'Chart-1.java'
+        bug_id = self.index[idx]
         file_name = bug_id + ".java"
         example_bug, example_fix = Defects4jDataset.pick_smallest_example_fix(self.clean_dataset, file_name, only_same=self.only_same)
         prompt = self.used_prompt.format(example_bug=example_bug, example_fix=example_fix, bug=self.problems[bug_id]['buggy'])
         return prompt, self.problems[bug_id]['buggy']
-        
+    
+    def get_buggy_code(self, idx):
+        return self.clean_dataset[self.index[idx]]['buggy']
+
+    def get_fix_code(self, idx):
+        return self.clean_dataset[self.index[idx]]['fix']
         
     def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
         bug_id = self.index[problem_id]

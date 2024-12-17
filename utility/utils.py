@@ -66,7 +66,43 @@ def aggregate_scores(token_list, scores, sep=["\n", "\n\n", "\n\n\n"]):
             aggregate_score.append(scores[idx])
     return result
 
-def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tokens": 600}, extra_generation_config=None):
+def postprocess_record(record, stop_sequences, tokenizer):
+    """
+    Post process the result.
+    """
+    def remove_stop_sequences(text, stop_seqs):
+        #text = text.strip()
+        for stop_seq in stop_seqs:
+            if text.endswith(stop_seq):
+                text = text[: -len(stop_seq)]
+        return text
+    
+    str_all = record["str_all"]
+    str_output = record["str_output"]
+    input_length = record["input_length"]
+    # Clean both str_all and str_output
+    cleaned_str_all = remove_stop_sequences(str_all, stop_sequences)
+    cleaned_str_output = remove_stop_sequences(str_output, stop_sequences)
+    
+    # Re-tokenize the cleaned_str_output to see how many tokens remain
+    final_token_ids = tokenizer.encode(cleaned_str_output, add_special_tokens=False)
+    final_length = len(final_token_ids)
+    original_length = record["output_len"]
+    tokens_to_remove = original_length - final_length
+    
+    if tokens_to_remove > 0:
+        # Adjust gen_probs if it exists
+        gen_probs = record["gen_probs"]
+        gen_probs[0] = gen_probs[0][:final_length]
+        record["gen_probs"] = gen_probs
+        record["token_output"] = record["token_output"][:input_length + final_length]
+        record["str_all"] = cleaned_str_all
+        record["str_output"] = cleaned_str_output
+        record["output_len"] = final_length
+        
+    return record
+
+def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tokens": 600}, extra_generation_config=None, remove_seq_list=None):
     # https://huggingface.co/docs/transformers/v4.44.2/en/main_classes/text_generation#transformers.GenerationMixin.generate
     # https://huggingface.co/docs/transformers/v4.44.2/en/main_classes/text_generation#transformers.GenerationConfig
     
@@ -94,10 +130,13 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
     seq = seq[0]
     str_all = tokenizer.decode(seq)
     str_output = tokenizer.decode(seq[input_length:], skip_special_tokens=True)
+    result["output_len"] = seq[input_length:].shape[0]
     result["str_all"] = str_all
     result["str_output"] = str_output
     token_output = seq.tolist()
     result["token_output"] = token_output
+    if remove_seq_list is not None:
+        result = postprocess_record(result, remove_seq_list, tokenizer)
     return result
 
 
