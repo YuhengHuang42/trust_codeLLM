@@ -322,12 +322,13 @@ def obtain_topk_tokens_by_prob(data, candidate_tokens, key, topk, agg_method=np.
     result = []
     for per_line in candidate_tokens:
         result.append(gen_probes[per_line])
-    mean_result = [agg_method(i) for i in result]
-    rank_per_line = sorted(list(zip(mean_result, [i for i in range(len(mean_result))])))[:topk] # From low to high
-    selected_token = set()
-    for line in rank_per_line:
-        selected_token = selected_token.union(set(candidate_tokens[line[1]]))
-    return selected_token
+    agg_result = [agg_method(i) for i in result]
+    rank_per_line = sorted(list(zip(agg_result, [i for i in range(len(agg_result))]))) # [:topk] # From low to high
+    rank_per_line = [i[1] for i in rank_per_line]
+    #selected_token = set()
+    #for line in rank_per_line:
+    #    selected_token = selected_token.union(set(candidate_tokens[line[1]]))
+    return agg_result, rank_per_line
 
 def load_shelve(path):
     path = str(path)

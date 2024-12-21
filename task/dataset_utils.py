@@ -191,7 +191,8 @@ def get_candidate_tokens(data, key, tokenizer, lang, code_blocks_info=None):
     """
     if code_blocks_info is None:
         code_blocks, code_blocks_info = utils.extract_code_block(data[key]['str_output'])
-
+    if len(code_blocks_info) == 0:
+        return None
     target_code_block_info = code_blocks_info[-1] # The last code enclosed by ``` ```.
     #tokenized_info = tokenizer(data[key]['str_output'], loggru=True, add_special_tokens=False)
     #tokenized_info_start_idx = utils.remove_redundant_tuples(tokenized_info["offset_mapping"])

@@ -89,15 +89,15 @@ def compute_recall(important_tokens: list, selected_tokens: list):
 
 def evaluate_binding(data, 
                  key_list, 
-                 #important_token_info, 
+                 important_token_info, 
                  recorder, 
                  tokenizer,
                  detection_model, 
                  language, 
-                 #layer,
-                 #score=0,
+                 layer,
+                 score=0,
                  counter=0,
-                 #topk=5,
+                 topk=5,
                  max_profile_token_length=4096,
                  extract_code=True,
                  before_act_dict=None,
@@ -119,9 +119,6 @@ def evaluate_binding(data,
             else:
                 code_blocks_info = [[0, len(data[key]["str_output"])]]
             candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
-            if candidate_tokens is None:
-                result[key] = [None, None]
-                continue
             token_length = len(data[key]['token_output'])
             tail_truncate = 0
             input_token_length = data[key]['input_length']
@@ -153,7 +150,7 @@ def evaluate_binding(data,
                 code_blocks_info = None
             else:
                 code_blocks_info = [[0, len(data[key]["str_output"])]]
-            #candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
+            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
             rank_per_line, y = detection_model.predict(x=before_act_dict[key], first_token=first_token_info_dict[key])
         #attn_snapshot = hook_info[layer]
         #del snapshot
@@ -163,16 +160,16 @@ def evaluate_binding(data,
         #pred_result = pred_result[:, 1]
         result[key] = [y, rank_per_line]
         #rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk]
-        #selected_token = set()
-        #for line in rank_per_line[:topk]:
-        #    selected_token = selected_token.union(set(candidate_tokens[int(line)]))
+        selected_token = set()
+        for line in rank_per_line[:topk]:
+            selected_token = selected_token.union(set(candidate_tokens[int(line)]))
         
-        #topk_score = compute_hit(important_token_info[key], selected_token)
-        #score += topk_score
-        #counter += 1
+        topk_score = compute_hit(important_token_info[key], selected_token)
+        score += topk_score
+        counter += 1
         
     #torch.save(pred_profiler, "pred_label_recoreder.pt")
-    return counter, result, oom_keys, before_act_dict, first_token_info_dict
+    return score, counter, result, oom_keys, before_act_dict, first_token_info_dict
     
 @app.command()
 def main(
@@ -230,10 +227,8 @@ def main(
     #    diff_results = utils.get_changes_with_line_numbers(dataset[int(key)]['fix'], data[key]['str_output'], "java")
     #    error_line_info[key] =  [list(set([i[0] for i in diff_results[0]] + [i[0] for i in diff_results[1]]))]
     target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
-    evaluate_key_mapping = {}
-    only_wrong_key_list = []
+    evaluate_key_list = []
     for key in data:
-        evaluate_key_mapping[key] = data[key]["code_correctness"]
         if key not in error_line_info:
             continue
         if data[key]["code_correctness"] == 'correct':
@@ -241,7 +236,7 @@ def main(
         if len(error_line_info[key][0]) == 0:
             logger.info("No error info for key: {}".format(key))
             continue
-        only_wrong_key_list.append(key)
+        evaluate_key_list.append(key)
 
     if mode != "uncertainty":
         if before_cache_save_folder is not None:
@@ -288,13 +283,15 @@ def main(
             
         #lbl_model.load(lbl_model_path)
         
-        counter, first_result, oom_keys, before_dict_1, first_token_info_dict_1 = \
+        score, counter, first_result, oom_keys, before_dict_1, first_token_info_dict_1 = \
         evaluate_binding(data, 
-                        list(evaluate_key_mapping.keys()), 
+                        evaluate_key_list, 
+                        important_token_info, 
                         recorder, 
                         tokenizer,
                         detection_model, 
                         language, 
+                        layer,
                         max_profile_token_length=max_profile_token_length,
                         extract_code=extract_code,
                         before_act_dict=before_dict,
@@ -316,13 +313,16 @@ def main(
                 recorder = extract_util.TransHookRecorder({layer: {"output_attentions": True}}, model)
             elif collect_type == "hidden":
                 recorder = extract_util.TransHookRecorder({layer: {"return_first": True}}, model, mode="plain") 
-            counter, second_result, oom_keys, before_dict_2, first_token_info_dict_2 = \
+            score, counter, second_result, oom_keys, before_dict_2, first_token_info_dict_2 = \
                 evaluate_binding(data, 
                                 oom_keys, 
+                                important_token_info, 
                                 recorder, 
                                 tokenizer,
                                 detection_model, 
                                 language, 
+                                layer,
+                                score=score,
                                 counter=counter,
                                 max_profile_token_length=max_profile_token_length,
                                 extract_code=extract_code,
@@ -348,38 +348,27 @@ def main(
         
     topk_recorder = {"hit_rate": {}, "recall": {}, "hit_line_rate": {}}
     hit_detail = dict()
-    if mode == "uncertainty":
-        for key in evaluate_key_mapping:
-            if extract_code:
-                code_blocks_info = None
-            else:
-                code_blocks_info = [[0, len(data[key]["str_output"])]]
-            candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
-            if candidate_tokens is None:
-                result[key] = [None, None]
-                continue
-            agg_result, rank_per_line = utils.obtain_topk_tokens_by_prob(data, candidate_tokens, key, np.mean)
-            result[key] = [agg_result, rank_per_line]
     for topk_iter in [1, 3, 5, 10]:
         hit_detail["top{}".format(topk_iter)] = dict()
         hit_score = 0
         hit_line_score = 0
         recall_score = 0
         counter = 0
-        for key in only_wrong_key_list:
+        for key in evaluate_key_list:
             if extract_code:
                 code_blocks_info = None
             else:
                 code_blocks_info = [[0, len(data[key]["str_output"])]]
             candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
-            if candidate_tokens is None:
-                result[key] = [None, None]
-                continue
-            recorded_result = result[key]
-            rank_per_line = recorded_result[1][:topk_iter]
-            selected_token = set()
-            for line in rank_per_line:
-                selected_token = selected_token.union(set(candidate_tokens[line]))
+            if mode != "uncertainty":
+                recorded_result = result[key]
+                rank_per_line = recorded_result[1][:topk_iter]
+                selected_token = set()
+                for line in rank_per_line:
+                    selected_token = selected_token.union(set(candidate_tokens[line]))
+            else:
+                selected_token = utils.obtain_topk_tokens_by_prob(data, candidate_tokens, key, topk_iter, np.mean)
+                result[key] = [None, list(selected_token)]
             
             cur_hit_score = compute_hit(important_token_info[key], selected_token)
             cur_hit_line_score = compute_hit_line(important_token_info[key], selected_token)
@@ -407,16 +396,10 @@ def main(
                 result[key][0] = result[key][0].tolist()
             if isinstance(result[key][1], torch.Tensor) or isinstance(result[key][1], np.ndarray):
                 result[key][1] = result[key][1].tolist()
-    
+        
     
     with open(result_output_path, "w") as ofile:
-        json.dump({"result": topk_recorder, 
-                   "pred_result": result, 
-                   "OOM_keys": oom_keys, 
-                   "hit_detail": hit_detail,
-                   "evaluate_key_mapping": evaluate_key_mapping
-                   }
-                  , ofile)
+        json.dump({"result": topk_recorder, "pred_result": result, "OOM_keys": oom_keys, "hit_detail": hit_detail}, ofile)
 
 if __name__ == "__main__":
     app()

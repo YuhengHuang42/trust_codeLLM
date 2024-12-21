@@ -9,8 +9,7 @@ from sklearn.decomposition import TruncatedSVD
 from imblearn.over_sampling import SMOTE
 from torch.nn.utils.rnn import pad_sequence
 from loguru import logger
-from torch.utils.data import Dataset
-import sispca
+#import sispca
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,6 +19,7 @@ from itertools import zip_longest
 from torch.nn.utils.rnn import pad_sequence
 
 from method.sae_model import Autoencoder, NaiveAutoEncoder
+from method.rank_util import DictDataset, RankNet, ScaledDotProductAttention, convert_to_torch_tensor
 # from sparse_autoencoder import LN
 
 PADDED_Y_VALUE = -1
@@ -105,15 +105,9 @@ def LN(x: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor, 
     std = x.std(dim=-1, keepdim=True)
     x = x / (std + eps)
     return x, mu, std
-    
-def convert_to_torch_tensor(array):
-    if isinstance(array, np.ndarray):
-        return torch.from_numpy(array)
-    elif isinstance(array, torch.Tensor):
-        return array
-    else:
-        raise TypeError("Input must be a NumPy array or a PyTorch tensor.")
 
+
+'''
 class SupervisedPrjection():
     def __init__(self):
         self.projection_matrix = None
@@ -214,21 +208,8 @@ class SupervisedPrjection():
         model.std = loaded_info["std"]
         model.vector_norm = loaded_info["vector_norm"]
         return model
-        
+'''
 
-class ScaledDotProductAttention(nn.Module):
-    def __init__(self, d_k):
-        super(ScaledDotProductAttention, self).__init__()
-        self.scale = torch.sqrt(torch.tensor(d_k, dtype=torch.float32))
-
-    def forward(self, Q, K, V):
-        # Compute attention scores
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
-        # Apply softmax to get attention weights
-        attn_weights = F.softmax(scores, dim=-1)
-        # Weighted sum of values
-        output = torch.matmul(attn_weights, V)
-        return output, attn_weights
           
 class AttentionModule(nn.Module):
     def __init__(self, 
@@ -323,383 +304,21 @@ class RiskPredictor(ABC):
     @abstractmethod
     def evaluate(self):
         return NotImplemented
+
+
+
+def compute_grad_norm(model):
+    total_grad_norm = 0
+    for param in model.parameters():
+        if param.grad is not None:  # Ensure the parameter has a gradient
+            param_norm = param.grad.norm(2)  # L2 norm of the gradients
+            total_grad_norm += param_norm.item() ** 2  # Sum of squares of all gradient norms
+
+    total_grad_norm = total_grad_norm ** 0.5  # Take the square root to get the total L2 norm
+    return total_grad_norm
     
 
-# Reference: https://github.com/Cadene/block.bootstrap.pytorch/blob/e938e9e269d2ec67499db327b903edbe821fed5f/block/models/networks/fusions/fusions.py
-class MLB(nn.Module):
-    def __init__(self,
-            n_inputs,
-            hidden_dim=1200,
-            output_dim=1,
-            activ_input='relu',
-            activ_output='relu',
-            normalize=False,
-            dropout_input=0.,
-            dropout_pre_lin=0.,
-            dropout_output=0.):
-        super(MLB, self).__init__()
-        self.n_inputs = n_inputs
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.activ_input = activ_input
-        self.activ_output = activ_output
-        self.normalize = normalize
-        self.dropout_input = dropout_input
-        self.dropout_pre_lin = dropout_pre_lin
-        self.dropout_output = dropout_output
-        # Modules
-        self.linear0 = nn.Linear(n_inputs, hidden_dim)
-        self.linear1 = nn.Linear(n_inputs, hidden_dim)
-        self.linear_out = nn.Linear(hidden_dim, output_dim)
-        self.n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-    def forward(self, input_x):
-        x, first_token = input_x
-        x0 = self.linear0(x)
-        x1 = self.linear1(first_token)
-
-        if self.activ_input:
-            x0 = getattr(F, self.activ_input)(x0)
-            x1 = getattr(F, self.activ_input)(x1)
-
-        if self.dropout_input > 0:
-            x0 = F.dropout(x0, p=self.dropout_input, training=self.training)
-            x1 = F.dropout(x1, p=self.dropout_input, training=self.training)
-
-        z = x0 * x1
-
-        if self.normalize:
-            z = torch.sqrt(F.relu(z)) - torch.sqrt(F.relu(-z))
-            z = F.normalize(z,p=2)
-
-        if self.dropout_pre_lin > 0:
-            z = F.dropout(z, p=self.dropout_pre_lin, training=self.training)
-
-        z = self.linear_out(z)
-
-        if self.activ_output:
-            z = getattr(F, self.activ_output)(z)
-
-        if self.dropout_output > 0:
-            z = F.dropout(z, p=self.dropout_output, training=self.training)
-        return z
-    
-class RankNet(nn.Module):
-    def __init__(self, 
-                 n_inputs, 
-                 layer_num, 
-                 hidden_size,
-                 enable_ln=False,
-                 enable_attn=False,
-                 enable_res=False,
-                 enable_mlb=False,
-                 code_num=32,
-                 drop_out_rate=0, 
-                 device="cuda", 
-                 lr=1e-4, 
-                 num_epochs=20, 
-                 batch_size=4):
-        super(RankNet, self).__init__()
-        self.n_inputs = n_inputs
-        self.layer_num = layer_num
-        self.hidden_size = hidden_size
-        self.enable_attn = enable_attn
-        self.enable_res = enable_res
-        self.enable_mlb = enable_mlb
-        self.res = None
-        self.attention = None
-        self.V = None
-        self.K = None
-        self.output_proj = None
-        self.drop_out_rate = drop_out_rate
-        self.enable_ln = enable_ln
-        if enable_attn:
-            self.attention = ScaledDotProductAttention(hidden_size)
-            self.V = torch.nn.Parameter(torch.randn(code_num, hidden_size))
-            self.K = torch.nn.Parameter(torch.randn(code_num, hidden_size))
-            self.output_proj = nn.Bilinear(hidden_size, hidden_size, hidden_size)
-            
-            #self.attention = LearnableAttention(n_inputs, hidden_size)
-            #blocks = [nn.Linear(hidden_size, hidden_size)]
-            #for _ in range(layer_num-2):
-            #    blocks.append(nn.ReLU(inplace=True))
-            #    blocks.append(nn.Linear(hidden_size, hidden_size))
-            #blocks.append(nn.ReLU(inplace=True))
-            #blocks.append(nn.Linear(hidden_size, 1))
-            #self.blocks = nn.Sequential(*blocks)
-        elif enable_res:
-            self.res = nn.Sequential(*[nn.Linear(n_inputs, hidden_size), nn.ReLU(inplace=True)])
-            blocks = [nn.Linear(hidden_size, hidden_size)]
-            for _ in range(layer_num-2):
-                blocks.append(nn.ReLU(inplace=True))
-                blocks.append(nn.Linear(hidden_size, hidden_size))
-            blocks.append(nn.ReLU(inplace=True))
-            blocks.append(nn.Linear(hidden_size, 1))
-            self.blocks = nn.Sequential(*blocks)
-        elif enable_mlb:
-            blocks = [MLB(n_inputs, hidden_size, output_dim=hidden_size, dropout_pre_lin=self.drop_out_rate)]
-            for _ in range(layer_num-2):
-                blocks.append(nn.Linear(hidden_size, hidden_size))
-                blocks.append(nn.ReLU(inplace=True))
-            blocks.append(nn.Linear(hidden_size, 1))
-            self.blocks = nn.Sequential(*blocks)
-        else:
-            blocks = [nn.Linear(n_inputs, hidden_size)]
-            for _ in range(layer_num-1):
-                blocks.append(nn.ReLU(inplace=True))
-                if self.drop_out_rate > 0:
-                    blocks.append(nn.Dropout(p=self.drop_out_rate))
-                blocks.append(nn.Linear(hidden_size, hidden_size))
-            blocks.append(nn.ReLU(inplace=True))
-            blocks.append(nn.Linear(hidden_size, 1))
-            self.blocks = nn.Sequential(*blocks)
-            #self.attention = None
-            #self.V = None
-            #self.K = None
-            #self.output_proj = None
-        
-        self.sigmoid = nn.Sigmoid()
-        
-        self.device = device
-        self.lr = lr
-        self.num_epochs = num_epochs
-        self.batch_size = batch_size
-        self.to(device)
-        
-
-    def forward(self, input_1, first_token=None):
-        if self.enable_ln is True:
-            input_1, mu, std = LN(input_1)
-        if self.enable_attn:
-            assert first_token is not None
-            first_token = first_token.to(self.device)
-            if len(first_token.shape) == 1:
-                first_token = first_token.unsqueeze(0)
-            if len(input_1.shape) == 2:
-                input_1 = input_1.unsqueeze(0)
-            attn_output, attn_weights = self.attention(first_token, self.K, self.V)
-            attn_output = attn_output.reshape(-1, 1, self.hidden_size)
-            repeat_counts = torch.tensor([input_1.shape[1]]).to(self.device)
-            attn_output = torch.repeat_interleave(attn_output, repeat_counts, dim=1)
-            output = self.output_proj(input_1, attn_output)
-            output = output + input_1
-        elif self.enable_res:
-            first_proj = self.res(first_token)
-            # (1, hidden_size)
-            input_1 = self.res(input_1)
-            # (L,)
-            output = input_1 + first_proj
-        elif self.enable_mlb:
-            output = [input_1, first_token]
-        else:
-            output = input_1
-        return torch.squeeze(self.sigmoid(self.blocks(output)), dim=-1)
-    
-    def fit(self, train_x, train_y, candidate_token_dict):
-        dataset = DictDataset(train_x, train_y, candidate_token_dict)
-        
-        collate_fn = self.get_collate_fn()
-        train_loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn)
-        loss_function = RankNet.approxNDCGLoss
-        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)
-        for epoch in range(self.num_epochs):
-            total_loss = 0
-            for x, y in train_loader:
-                optimizer.zero_grad()
-                x = x.to(self.device)
-                y = y.to(self.device)
-                #context = context.to(device)
-                #lengths = lengths.to(device)
-
-                output = self(x)
-                
-                loss = loss_function(output, y)
-                loss.backward()
-                #torch.nn.utils.clip_grad_norm_(am.parameters(), 1, error_if_nonfinite=True)
-                optimizer.step()
-                #print(compute_grad_norm(am))
-                total_loss += loss.item()
-    
-    def get_collate_fn(self, fillvalue=-1):
-        def collate_fn(batch):
-            x, y, candidate_token = zip(*batch)
-            #lengths = [len(seq) for seq in x]
-            rank_y = []
-            for idx, item in enumerate(y):
-                rank_y.append(RankNet.assign_and_normalize_scores(item, candidate_token[idx]))
-                
-            # Find the maximum length
-            max_length = max(len(item) for item in rank_y)
-
-            # Pad sequences with zeros and convert to tensor
-            padded_rank_y = torch.tensor(
-                list(zip_longest(*rank_y, fillvalue=fillvalue)), dtype=torch.float32
-            ).transpose(0, 1)  # Transpose to get (batch_size, max_length)
-            
-            padded_x = pad_sequence(x, batch_first=True, padding_value=-1)
-            
-            return padded_x, padded_rank_y
-        return collate_fn
-    
-    def predict(self, x, first_token=None):
-        with torch.inference_mode():
-            x = x.to(self.device)
-            first_token = first_token.to(self.device)
-            y = self(x, first_token=first_token).cpu()
-            y = y.squeeze(0)
-            ranking = torch.sort(y, dim=-1, descending=True).indices.tolist()
-            return ranking, y
-    
-    def predict_proba(self, first_token, x):
-        x = convert_to_torch_tensor(x)
-        x = x.to(self.device)
-        ranking, y = self.predict(x, first_token=first_token)
-        return ranking, y
-    
-
-    @classmethod
-    def load(cls, path, device=None):
-        loaded_info = torch.load(path)
-        n_inputs = loaded_info["meta"]["n_inputs"]
-        layer_num = loaded_info["meta"]["layer_num"]
-        hidden_size = loaded_info["meta"]["hidden_size"]
-        lr = loaded_info["meta"]["lr"]
-        num_epochs = loaded_info["meta"]["num_epochs"]
-        batch_size = loaded_info["meta"]["batch_size"]
-        enable_attn = loaded_info["meta"].get("enable_attn", False)
-        parameter_dict = {
-            "n_inputs": n_inputs,
-            "layer_num": layer_num,
-            "hidden_size": hidden_size,
-            "lr": lr,
-            "num_epochs": num_epochs,
-            "batch_size": batch_size,
-            "enable_attn": enable_attn
-        }
-        if device is not None:
-            parameter_dict["device"] = device
-        model = cls(**parameter_dict)
-        model.load_state_dict(loaded_info["state_dict"])
-        #model.encoder = encoder.to(device)
-        return model
-    
-    def save(self, path):
-        torch.save({
-            "meta": {
-                "n_inputs": self.n_inputs,
-                "layer_num": self.layer_num,
-                "hidden_size": self.hidden_size,
-                "lr": self.lr,
-                "num_epochs": self.num_epochs,
-                "batch_size": self.batch_size,
-                "enable_attn": self.enable_attn
-            },
-            "state_dict": self.state_dict()
-        }, path)
-    
-    @staticmethod
-    def assign_and_normalize_scores(line_label, candidate_token):
-        """
-        Assign and normalize scores to data points based on the following rules:
-        1. For data points with line_label >= 1, their scores must be higher than those with line_label == 0.
-        2. Data points with line_label == 0 must have the same score.
-        3. For data points with line_label == 1, those with higher line_length get higher scores.
-        4. Normalize all scores to [0, 1], with the highest score as 1.
-
-        Args:
-            line_label (list): A list of labels for each data point.
-            candidate_token (list): A list of candidate tokens
-
-        Returns:
-            list: A list of normalized scores assigned to each data point.
-        """
-        line_length = [len(i) for i in candidate_token]
-        # Initialize raw scores
-        raw_scores = [0] * len(line_label)
-
-        # Determine the base scores for each label category
-        score_zero = 1  # Base score for label == 0
-        score_one_base = 10  # Base score for label == 1
-        score_high_label_base = 20  # Base score for label > 1
-
-        # Process data points with label == 0
-        for i, label in enumerate(line_label):
-            if label >= 0:
-                raw_scores[i] = score_zero
-
-        # Process data points with label == 1
-        # Sort indices by length for label == 1
-        one_indices = [i for i, label in enumerate(line_label) if label == 1]
-        one_indices_sorted = sorted(one_indices, key=lambda i: line_length[i])
-        for rank, i in enumerate(one_indices_sorted):
-            raw_scores[i] = score_one_base + rank  # Increment score based on rank
-
-        # Process data points with label > 1
-        for i, label in enumerate(line_label):
-            if label > 1:
-                raw_scores[i] = score_high_label_base + label  # Ensure scores are greater than label == 0
-
-        # Normalize raw scores to [0, 1]
-        min_score = min(raw_scores)
-        max_score = max(raw_scores)
-        normalized_scores = [
-            (score - min_score) / (max_score - min_score) if max_score > min_score else 0
-            for score in raw_scores
-        ]
-
-        return normalized_scores
-
-    @staticmethod
-    def approxNDCGLoss(y_pred, y_true, eps=DEFAULT_EPS, padded_value_indicator=PADDED_Y_VALUE, alpha=1.):
-        """
-        Loss based on approximate NDCG introduced in "A General Approximation Framework for Direct Optimization of
-        Information Retrieval Measures". Please note that this method does not implement any kind of truncation.
-        :param y_pred: predictions from the model, shape [batch_size, slate_length]
-        :param y_true: ground truth labels, shape [batch_size, slate_length]
-        :param eps: epsilon value, used for numerical stability
-        :param padded_value_indicator: an indicator of the y_true index containing a padded item, e.g. -1
-        :param alpha: score difference weight used in the sigmoid function
-        :return: loss value, a torch.Tensor
-        """
-        device = y_pred.device
-        y_pred = y_pred.clone()
-        y_true = y_true.clone()
-
-        padded_mask = y_true == padded_value_indicator
-        y_pred[padded_mask] = float("-inf")
-        y_true[padded_mask] = float("-inf")
-
-        # Here we sort the true and predicted relevancy scores.
-        y_pred_sorted, indices_pred = y_pred.sort(descending=True, dim=-1)
-        y_true_sorted, _ = y_true.sort(descending=True, dim=-1)
-
-        # After sorting, we can mask out the pairs of indices (i, j) containing index of a padded element.
-        true_sorted_by_preds = torch.gather(y_true, dim=1, index=indices_pred)
-        true_diffs = true_sorted_by_preds[:, :, None] - true_sorted_by_preds[:, None, :]
-        padded_pairs_mask = torch.isfinite(true_diffs)
-        padded_pairs_mask.diagonal(dim1=-2, dim2=-1).zero_()
-
-        # Here we clamp the -infs to get correct gains and ideal DCGs (maxDCGs)
-        true_sorted_by_preds.clamp_(min=0.)
-        y_true_sorted.clamp_(min=0.)
-
-        # Here we find the gains, discounts and ideal DCGs per slate.
-        pos_idxs = torch.arange(1, y_pred.shape[1] + 1).to(device)
-        D = torch.log2(1. + pos_idxs.float())[None, :]
-        maxDCGs = torch.sum((torch.pow(2, y_true_sorted) - 1) / D, dim=-1).clamp(min=eps)
-        G = (torch.pow(2, true_sorted_by_preds) - 1) / maxDCGs[:, None]
-
-        # Here we approximate the ranking positions according to Eqs 19-20 and later approximate NDCG (Eq 21)
-        scores_diffs = (y_pred_sorted[:, :, None] - y_pred_sorted[:, None, :])
-        scores_diffs[~padded_pairs_mask] = 0.
-        approx_pos = 1. + torch.sum(padded_pairs_mask.float() * (torch.sigmoid(-alpha * scores_diffs).clamp(min=eps)), dim=-1)
-        approx_D = torch.log2(1. + approx_pos)
-        approx_NDCG = torch.sum((G / approx_D), dim=-1)
-
-        return -torch.mean(approx_NDCG)
-
-
-        
+       
 class EncoderClassifier(RiskPredictor):
     def __init__(self):
         self.fit_model_param = None
@@ -787,8 +406,11 @@ class EncoderClassifier(RiskPredictor):
                     )
     
     @classmethod
-    def load(cls, path):
-        loaded_info = torch.load(path)
+    def load(cls, info, from_memory=False):
+        if from_memory:
+            loaded_info = info
+        else:
+            loaded_info = torch.load(info)
         model = cls()
         model.clf = loaded_info["model"]
         model.fit_model_param = loaded_info["param"]
@@ -851,7 +473,9 @@ class EncoderClassifier(RiskPredictor):
             rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)
             rank_per_line = [i[1] for i in rank_per_line]
         elif self.model_type == "ranker":
-            rank_per_line, y = self.clf.predict_proba(hidden_first, latent)
+            rank_per_line, y, class_scores = self.clf.predict_proba(hidden_first, latent)
+            if class_scores is not None:
+                y = class_scores
         else:
             y = self.clf.predict_proba(latent)
             pred_result = y[:, 1].tolist()
@@ -918,7 +542,6 @@ class EncoderClassifier(RiskPredictor):
             pred_label_recoreder = [pred_label_recoreder[key] for key in key_list]
         return sklearn.metrics.accuracy_score(y, pred_label_recoreder), pred_profiler
             
-
 class LBLRegression():
     def __init__(self):
         self.fit_model_param = None
@@ -1100,18 +723,3 @@ def obtain_sorted_code(input_tensor, topk):
     #return normalized_index#, sorted_array
     return np.concatenate([normalized_index, sorted_array], axis=-1)
 
-class DictDataset(Dataset):
-    def __init__(self, dict_x, dict_y, dict_z=None):
-        self.dict_x = dict_x
-        self.dict_y = dict_y
-        self.dict_z = dict_z
-        self.keys = sorted(self.dict_x.keys())
-    
-    def __getitem__(self, index):
-        return_item = [self.dict_x[self.keys[index]], self.dict_y[self.keys[index]]]
-        if self.dict_z is not None:
-            return_item.append(self.dict_z[self.keys[index]])
-        return return_item
-    
-    def __len__(self):
-        return len(self.keys)
