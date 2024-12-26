@@ -612,3 +612,25 @@ def extract_top_level_function_names(code):
         if isinstance(node, ast.FunctionDef):
             function_names.append(node.name)
     return function_names
+
+def determine_correctness(item):
+    if isinstance(item, dict):
+        if "result" in item:
+            if item["result"] in ["passed", "correct", "success"]:
+                return 0
+            else:
+                return 1
+        elif "pass@1" in item:
+            if item["pass@1"] >= 1.0:
+                return 0
+            else:
+                return 1
+        else:
+            raise Exception
+    elif isinstance(item, str):
+        if item in ["passed", "correct", "success"]:
+            return 0
+        else:
+            return 1
+    else:
+        raise Exception

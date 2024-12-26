@@ -29,8 +29,8 @@ from task import dataset_utils
 STORE = 0
 LOAD = 1
 
-app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
-#app = typer.Typer()
+#app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
+app = typer.Typer()
 
 def compute_hit_line(important_tokens: list, selected_tokens: list):
     """
@@ -101,10 +101,13 @@ def evaluate_binding(data,
                  max_profile_token_length=4096,
                  extract_code=True,
                  before_act_dict=None,
-                 first_token_info_dict=None
+                 first_token_info_dict=None,
+                 verbose=True
                  ):
     oom_keys = []
     result = dict()
+    if isinstance(detection_model.clf, torch.nn.Module):
+        detection_model.clf = detection_model.clf.eval()
     #pred_profiler = list()
     if before_act_dict is None:
         mode = STORE
@@ -112,14 +115,15 @@ def evaluate_binding(data,
         first_token_info_dict = dict()
     else:
         mode = LOAD
-    for key in tqdm.tqdm(key_list):
+    iterable =  tqdm.tqdm(key_list) if verbose else key_list
+    for key in iterable:
         if mode == STORE:
             if extract_code:
                 code_blocks_info = None
             else:
                 code_blocks_info = [[0, len(data[key]["str_output"])]]
             candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=code_blocks_info)
-            if candidate_tokens is None:
+            if candidate_tokens is None or len(candidate_tokens) == 0:
                 result[key] = [None, None]
                 continue
             token_length = len(data[key]['token_output'])
@@ -149,6 +153,8 @@ def evaluate_binding(data,
             before_act_dict[key] = copy.deepcopy(detection_model.cache.astype(np.float16))
             first_token_info_dict[key] = copy.deepcopy(detection_model.hidden_first.to(torch.float16))
         else:
+            if key not in before_act_dict:
+                continue
             if extract_code:
                 code_blocks_info = None
             else:
@@ -164,7 +170,7 @@ def evaluate_binding(data,
         result[key] = [y, rank_per_line]
         #rank_per_line = sorted(list(zip(pred_result, [i for i in range(len(pred_result))])), reverse=True)[:topk]
         #selected_token = set()
-        #for line in rank_per_line[:topk]:
+        #for line in rank_per_line[:topk]:[]
         #    selected_token = selected_token.union(set(candidate_tokens[int(line)]))
         
         #topk_score = compute_hit(important_token_info[key], selected_token)
@@ -183,6 +189,7 @@ def main(
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
     detection_model_path: Annotated[Path, typer.Option()] = None,
     before_cache_save_folder: Annotated[Path, typer.Option()] = None,
+    mode: Annotated[str, typer.Option()] = None,
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
@@ -199,12 +206,15 @@ def main(
     if detection_model_path is None:
         # Fallback policy
         detection_model_path = config_dict["task_config"]["detection_model_path"]
-    mode = config_dict["task_config"]["mode"]
+    if mode is None:
+        mode = config_dict["task_config"]["mode"]
     max_profile_token_length = config_dict["task_config"]["max_profile_token_length"]
     extract_code = config_dict["task_config"]["extract_code"]
     collect_type = config_dict["task_config"]['collect_type']
     assert collect_type in ["attention", "hidden"]
-    assert mode in ["lbl", "sae", "uncertainty"]
+    assert mode in ["lbl", "sae", "uncertainty", "internal_only"]
+    if mode == "internal_only":
+        mode = "sae" # SAE and Internal_only share the same interface, the difference is that the latter does not have encoder.
     
     cache_dir = None
     if "HF_HOME" in config_dict["system_setting"]:
@@ -236,7 +246,7 @@ def main(
         evaluate_key_mapping[key] = data[key]["code_correctness"]
         if key not in error_line_info:
             continue
-        if data[key]["code_correctness"] == 'correct':
+        if utils.determine_correctness(data[key]["code_correctness"]) == 0: # correct
             continue
         if len(error_line_info[key][0]) == 0:
             logger.info("No error info for key: {}".format(key))

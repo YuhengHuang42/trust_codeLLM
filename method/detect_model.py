@@ -36,7 +36,8 @@ def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, 
         input_token_length: int. The token length of the input prompt.
         output_seg: List[List]: List of segment tokens. It should be str_output version
     Return:
-        vt: torch.tensor. vt in the paper with the shape [multi_head_num]
+        #vt: torch.tensor. vt in the paper with the shape [multi_head_num]
+        al_result: List[Tensor]. The attention score of each segment. Each tensor has the shape [multi_head_num]
     """
     
     al_context = attn_snapshot[layer][0][:, -1, :input_token_length]
@@ -450,8 +451,13 @@ class EncoderClassifier(RiskPredictor):
         else:
             self.hidden_first = first_token
         with torch.inference_mode():
-            hidden_first, _ = self.encoder.encode(self.hidden_first)
+            if self.encoder is not None:
+                hidden_first, _ = self.encoder.encode(self.hidden_first)
+            else:
+                hidden_first = first_token
         latent, before_enc = collect_hidden_states(layer_info, input_token_length, candidate_tokens, self.encoder, before_enc=x)
+        if latent is None:
+            latent = before_enc # No encoder is provided. Internal-only mode
         latent = latent.numpy().astype(np.float32)
         self.cache = before_enc.numpy().astype(np.float32)
         if self.sorting_code:
@@ -723,3 +729,40 @@ def obtain_sorted_code(input_tensor, topk):
     #return normalized_index#, sorted_array
     return np.concatenate([normalized_index, sorted_array], axis=-1)
 
+
+import numpy as np
+from sklearn.metrics import roc_curve
+
+def sensivity_specifity_cutoff(y_true, y_score):
+    '''Find data-driven cut-off for classification
+    
+    Cut-off is determied using Youden's index defined as sensitivity + specificity - 1.
+    
+    Parameters
+    ----------
+    
+    y_true : array, shape = [n_samples]
+        True binary labels.
+        
+    y_score : array, shape = [n_samples]
+        Target scores, can either be probability estimates of the positive class,
+        confidence values, or non-thresholded measure of decisions (as returned by
+        “decision_function” on some classifiers).
+        
+    References
+    ----------
+    https://gist.github.com/twolodzko/4fae2980a1f15f8682d243808e5859bb
+    
+    Ewald, B. (2006). Post hoc choice of cut points introduced bias to diagnostic research.
+    Journal of clinical epidemiology, 59(8), 798-801.
+    
+    Steyerberg, E.W., Van Calster, B., & Pencina, M.J. (2011). Performance measures for
+    prediction models and markers: evaluation of predictions and classifications.
+    Revista Espanola de Cardiologia (English Edition), 64(9), 788-794.
+    
+    Jiménez-Valverde, A., & Lobo, J.M. (2007). Threshold criteria for conversion of probability
+    of species presence to either–or presence–absence. Acta oecologica, 31(3), 361-369.
+    '''
+    fpr, tpr, thresholds = roc_curve(y_true, y_score)
+    idx = np.argmax(tpr - fpr)
+    return thresholds[idx]

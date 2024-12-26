@@ -263,7 +263,7 @@ def load_from_existing_data_old(training_data_path,
 
 def load_from_existing_data(training_data_path,
                             mode, 
-                            #pass_mode, 
+                            pass_mode, 
                             encoder,
                            ):
     training_data = torch.load(training_data_path)
@@ -273,9 +273,9 @@ def load_from_existing_data(training_data_path,
     store_y = training_data["store_y"]
     first_token_info = training_data["first_token"]
     candidate_token_dict = training_data["candidate_token_dict"]
-    #if pass_mode == "dict":
-    train_x = {}
-    train_y = {}
+    if pass_mode == "dict":
+        train_x = {}
+        train_y = {}
     for key in snapshot_x:
         #if key not in data:
         #    continue
@@ -287,11 +287,10 @@ def load_from_existing_data(training_data_path,
         #input_token_length = data[key]["input_length"]
         if mode == "lbl":
             #al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-            #if pass_mode == "dict":
-            #train_x[key] = torch.stack(snap_shot_single)
-            train_x[key] = snap_shot_single
-            #else:
-            #   train_x += [i for i in snap_shot_single]
+            if pass_mode == "dict":
+                train_x[key] = torch.stack(snap_shot_single)
+            else:
+                train_x += [i for i in snap_shot_single]
         elif (mode == "sae" or mode =="ae") or mode == "internal_only":
             #latent_activations, _ = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
             with torch.inference_mode():
@@ -302,29 +301,20 @@ def load_from_existing_data(training_data_path,
                 elif mode == "internal_only":
                     latent_activations = snap_shot_single
                     first_act = None
-                #if pass_mode == "dict":
-                train_x[key] = latent_activations.cpu()
-                #else:
-                #    train_x += [i for i in latent_activations]
+                if pass_mode == "dict":
+                    train_x[key] = latent_activations.cpu()
+                else:
+                    train_x += [i for i in latent_activations]
                 if first_act is not None:
                     first_token_info[0][key] = first_act.cpu()
                 else:
                     first_token_info[0][key] = None
-        #if pass_mode == "dict":
-        train_y[key] = store_y[key]
-        #else:
-        #    train_y += store_y[key]
+        if pass_mode == "dict":
+            train_y[key] = store_y[key]
+        else:
+            train_y += store_y[key]
     return train_x, train_y, first_token_info[0], first_token_info[1], candidate_token_dict
 
-def aggregate_feature(feature, agg):
-    if isinstance(feature, list):
-        feature = np.array(feature)
-    assert len(feature.shape) == 2
-    if agg == "mean":
-        return np.mean(feature, axis=0)
-    elif agg == "last":
-        return feature[-1]
-    
 @app.command()
 def main(
     #important_label_path: Annotated[List[str], typer.Option()],
@@ -333,8 +323,7 @@ def main(
     model_save_path: Annotated[Path, typer.Option()],
     training_data_folder: Annotated[Path, typer.Option()] = None,
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
-    encoder_path: Annotated[Path, typer.Option()] = None,
-    agg: Annotated[str, typer.Option()] = None,
+    encoder_path: Annotated[Path, typer.Option()] = None
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
@@ -435,26 +424,12 @@ def main(
                                                                                                                                         pass_mode, 
                                                                                                                                         #data_line_token_pair[data_class_idx], 
                                                                                                                                         encoder)
-            if agg is not None:
-                for key in cur_train_x:
-                    cur_train_x[key] = aggregate_feature(cur_train_x[key], agg) # (L, hidden_dim) --> (hidden_dim)
-                for key in cur_train_y:
-                    cur_train_y[key] = [max(cur_train_y[key])] # Assume 1 means incorrect code.
             if pass_mode == "dict":
                 train_x[data_class_name] = cur_train_x
                 train_y[data_class_name] = cur_train_y
             else:
-                list_cur_train_x = []
-                for key in cur_train_x:
-                    if agg is not None:
-                        list_cur_train_x.append(cur_train_x[key])
-                    else:
-                        list_cur_train_x += [i for i in cur_train_x[key]]
-                list_cur_train_y = []
-                for key in cur_train_y:
-                    list_cur_train_y += cur_train_y[key]
-                train_x += list_cur_train_x
-                train_y += list_cur_train_y
+                train_x += cur_train_x
+                train_y += cur_train_y
             first_token_dict[data_class_name] = cur_first_token_dict
             candidate_token_dict[data_class_name] = cur_candidate_token_dict
             first_token_in_dict[data_class_name] = cur_first_token_in_dict
@@ -528,25 +503,13 @@ def main(
                             latent_activations = before_latent_activations
                     snapshot_x[data_class_name][key] = before_latent_activations.cpu().numpy()
                     if pass_mode == "dict":
-                        if agg is None:
-                            train_x[data_class_name][key] = latent_activations.cpu().numpy()
-                        else:
-                            train_x[data_class_name][key] = aggregate_feature(latent_activations.cpu().numpy(), agg)
+                        train_x[data_class_name][key] = latent_activations.cpu()
                     else:
-                        if agg is None:
-                            train_x += [i for i in latent_activations.cpu().numpy()]
-                        else:
-                            train_x.append(aggregate_feature(latent_activations.cpu().numpy(), agg))
+                        train_x += [i for i in latent_activations]
                 if pass_mode == "dict":
-                    if agg is None:
-                        train_y[data_class_name][key] = label_dict[key]
-                    else:
-                        train_y[data_class_name][key] = max(label_dict[key])
+                    train_y[data_class_name][key] = label_dict[key]
                 else:
-                    if agg is None:
-                        train_y += label_dict[key]
-                    else:
-                        train_y.append(max(label_dict[key]))
+                    train_y += label_dict[key]
                 store_y[data_class_name][key] = label_dict[key]
             torch.save(
                 {"snapshot_x": snapshot_x[data_class_name], 
@@ -590,8 +553,8 @@ def main(
         clf = EncoderClassifier()
         clf.fit(train_info, model_type, fit_model_param, encoder, vector_norm=vector_norm, external_proj=external_proj)
     clf.save(model_save_path)
-    #accuracy, pred_profiler = clf.evaluate(train_x, train_y)
-    #logger.info(f"Accuracy on training data: {accuracy}")
+    accuracy, pred_profiler = clf.evaluate(train_x, train_y)
+    logger.info(f"Accuracy on training data: {accuracy}")
     #torch.save(pred_profiler, "pred_label_recoreder.pt")
     
     

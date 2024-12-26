@@ -13,6 +13,33 @@ from loguru import logger
 PADDED_Y_VALUE = -1
 DEFAULT_EPS = 1e-10
 
+def masked_max(x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+    """
+    Args:
+        x: Tensor of shape (N, L, hidden_dim)
+        lengths: 1D tensor of shape (N,) with valid sequence lengths.
+
+    Returns:
+        max_vals: Tensor of shape (N, hidden_dim), where each row
+                  is the max over the valid time steps for that sequence.
+    """
+    N, L, hidden_dim = x.shape
+    device = x.device
+
+    # Create a mask of shape (N, L) -> True where index < length, else False
+    idxs = torch.arange(L, device=device).unsqueeze(0)  # shape (1, L)
+    mask = idxs < lengths.unsqueeze(1)                 # shape (N, L)
+
+    # Expand mask to (N, L, hidden_dim) so it can be applied to x
+    mask_3d = mask.unsqueeze(-1).expand(-1, -1, hidden_dim)
+
+    # Replace padding positions with -inf
+    x_masked = x.masked_fill(~mask_3d, float('-inf'))
+
+    # Take max along the length dimension (dim=1)
+    max_vals, _ = x_masked.max(dim=1)
+    return max_vals
+
 def LN(x: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     mu = x.mean(dim=-1, keepdim=True)
     x = x - mu
@@ -442,7 +469,8 @@ class RankNet(nn.Module):
                  enable_mlb=False,
                  enable_classifier=False,
                  code_num=32,
-                 drop_out_rate=0, 
+                 drop_out_rate=0,
+                 act="relu",
                  device="cuda", 
                  ):
         super(RankNet, self).__init__()
@@ -461,15 +489,28 @@ class RankNet(nn.Module):
         self.enable_ln = enable_ln
         self.code_num = code_num
         self.enable_classifier = enable_classifier
+        self.agg = None
+        self.act = act
+        act_func = getattr(nn, act)
         if enable_classifier:
             self.classfier = nn.Linear(hidden_size, 2)
             
         if enable_attn:
+            self.down_sample = nn.Sequential(*[nn.Linear(n_inputs, hidden_size), act_func(inplace=True)])
             self.attention = ScaledDotProductAttention(hidden_size)
             self.V = torch.nn.Parameter(torch.randn(code_num, hidden_size))
             self.K = torch.nn.Parameter(torch.randn(code_num, hidden_size))
             self.output_proj = nn.Bilinear(hidden_size, hidden_size, hidden_size)
-            
+
+            blocks = []
+            for _ in range(layer_num-2):
+                blocks.append(act_func(inplace=True))
+                if self.drop_out_rate > 0:
+                    blocks.append(nn.Dropout(p=self.drop_out_rate))
+                blocks.append(nn.Linear(hidden_size, hidden_size))
+            blocks.append(act_func(inplace=True))
+            blocks.append(nn.Linear(hidden_size, 1))
+            self.blocks = nn.Sequential(*blocks)
             #self.attention = LearnableAttention(n_inputs, hidden_size)
             #blocks = [nn.Linear(hidden_size, hidden_size)]
             #for _ in range(layer_num-2):
@@ -479,29 +520,29 @@ class RankNet(nn.Module):
             #blocks.append(nn.Linear(hidden_size, 1))
             #self.blocks = nn.Sequential(*blocks)
         elif enable_res:
-            self.res = nn.Sequential(*[nn.Linear(n_inputs, hidden_size), nn.ReLU(inplace=True)])
+            self.res = nn.Sequential(*[nn.Linear(n_inputs, hidden_size), act_func(inplace=True)])
             blocks = [nn.Linear(hidden_size, hidden_size)]
             for _ in range(layer_num-2):
-                blocks.append(nn.ReLU(inplace=True))
+                blocks.append(act_func(inplace=True))
                 blocks.append(nn.Linear(hidden_size, hidden_size))
-            blocks.append(nn.ReLU(inplace=True))
+            blocks.append(act_func(inplace=True))
             blocks.append(nn.Linear(hidden_size, 1))
             self.blocks = nn.Sequential(*blocks)
         elif enable_mlb:
             blocks = [MLB(n_inputs, hidden_size, output_dim=hidden_size, dropout_pre_lin=self.drop_out_rate)]
             for _ in range(layer_num-2):
                 blocks.append(nn.Linear(hidden_size, hidden_size))
-                blocks.append(nn.ReLU(inplace=True))
+                blocks.append(act_func(inplace=True))
             blocks.append(nn.Linear(hidden_size, 1))
             self.blocks = nn.Sequential(*blocks)
         else:
             blocks = [nn.Linear(n_inputs, hidden_size)]
             for _ in range(layer_num-1):
-                blocks.append(nn.ReLU(inplace=True))
+                blocks.append(act_func(inplace=True))
                 if self.drop_out_rate > 0:
                     blocks.append(nn.Dropout(p=self.drop_out_rate))
                 blocks.append(nn.Linear(hidden_size, hidden_size))
-            blocks.append(nn.ReLU(inplace=True))
+            blocks.append(act_func(inplace=True))
             blocks.append(nn.Linear(hidden_size, 1))
             self.blocks = nn.Sequential(*blocks)
             #self.attention = None
@@ -525,6 +566,8 @@ class RankNet(nn.Module):
                 first_token = first_token.unsqueeze(0)
             if len(input_1.shape) == 2:
                 input_1 = input_1.unsqueeze(0)
+            first_token = self.down_sample(first_token)
+            input_1 = self.down_sample(input_1)
             attn_output, attn_weights = self.attention(first_token, self.K, self.V)
             attn_output = attn_output.reshape(-1, 1, self.hidden_size)
             repeat_counts = torch.tensor([input_1.shape[1]]).to(self.device)
@@ -543,7 +586,7 @@ class RankNet(nn.Module):
             output = input_1
         return self.blocks[:-1](output)
         
-    def forward_both(self, input_1, first_token=None, length=None, agg="last"):
+    def forward_both(self, input_1, first_token=None, length=None):
         """
         Args
         ---
@@ -552,32 +595,47 @@ class RankNet(nn.Module):
             length: (batch_size,) or None
             agg: aggregation method. Either "last" or "mean"
         """
-        assert agg in ["last", "mean"]
+        agg = self.agg
+        assert agg in ["last", "mean", "rank", "max"]
         if length is None:
             assert len(input_1.shape) == 2
         else:
             length = convert_to_torch_tensor(length)
         penu_output = self.share_forward(input_1, first_token=first_token)
-        ranking_output = torch.squeeze(self.sigmoid(self.blocks[-1](penu_output)), dim=-1)
+        ranking_output = torch.squeeze(self.sigmoid(self.blocks[-1](penu_output)), dim=-1) #(N, L)
         if agg == "last":
             if length is None:
-                return self.classfier(penu_output[-1])
+                penu_output = penu_output.reshape(1, -1, self.hidden_size)
+                last_tokens = penu_output[:, -1]
             else:
                 batch_indices = torch.arange(input_1.shape[0])
                 last_token_indices = length - 1  # Indices of the last valid token
                 last_tokens = penu_output[batch_indices, last_token_indices]
-                classification =  self.classfier(last_tokens)
-        else:
+            classification = self.classfier(last_tokens)
+        elif agg == "max":
             if length is None:
-                return self.classfier(penu_output.mean(dim=0))
+                classification = self.classfier(penu_output.max(dim=0).values)
+            else:
+                max_value = masked_max(penu_output, length)
+                classification = self.classfier(max_value)
+        elif agg == "mean":
+            if length is None:
+                classification = self.classfier(penu_output.mean(dim=0))
             else:
                 masks = torch.arange(input_1.shape[1]).unsqueeze(0).to(length.device) < length.unsqueeze(1)  # Create masks for valid positions
                 masked_input = penu_output * masks.unsqueeze(-1) 
                 sums = masked_input.sum(dim=1)  # Sum over the length dimension
                 averages = sums / length.unsqueeze(-1)  # Divide by lengths
                 classification = self.classfier(averages)
-        class_scores = nn.functional.log_softmax(classification, dim=-1)
-        return ranking_output, class_scores
+        elif agg == "rank":
+            ranking_output = ranking_output.squeeze(0)
+            _, max_indices = torch.max(ranking_output, dim=-1)  # max_indices: Shape (N,)
+            if length is None:
+                classification = self.classfier(penu_output[max_indices])
+            else:
+                classification = self.classfier(penu_output[torch.arange(input_1.shape[0]), max_indices])
+        #class_scores = nn.functional.log_softmax(classification, dim=-1)
+        return ranking_output, classification
     
     
     
@@ -601,14 +659,15 @@ class RankNet(nn.Module):
         co_training = learning_param.get("co_training", False)
         if self.enable_classifier:
             agg = learning_param.get("agg", "last")
-            class_loss_fn = nn.NLLLoss()
+            class_loss_fn = nn.CrossEntropyLoss()
+            self.agg = agg
         if loss_fn == "approxNDCGLoss":
             loss_function = approxNDCGLoss
         elif loss_fn == "neuralNDCG":
             loss_function = neuralNDCG
         else:
             raise ValueError("Invalid loss function. Must be either approxNDCGLoss or neuralNDCG")
-        collate_fn = self.get_collate_fn()
+        collate_fn = self.get_collate_fn(enable_attn=self.enable_attn)
         train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), 
                                      lr=lr, 
@@ -633,7 +692,7 @@ class RankNet(nn.Module):
                 if self.enable_classifier and co_training is True:
                     x = x.to(self.device)
                     y = y.to(self.device)
-                    ranking_output, class_scores = self.forward_both(x, length=length, agg=agg)
+                    ranking_output, class_scores = self.forward_both(x, length=length)
                     class_loss = class_loss_fn(class_scores, class_label)
                     ranking_idx = torch.logical_and(class_label, length>1)
                     if sum(ranking_idx) > 0:
@@ -658,41 +717,48 @@ class RankNet(nn.Module):
         self.eval()
         return loss_list
     
-    def fit_classifier(self, train_x, train_y, candidate_token_dict, verbose=False, learning_param={}):
+    def fit_classifier(self, train_x, train_y, candidate_token_dict, first_token_dict=None, verbose=False, learning_param={}):
         # Freeze layer1 parameters
-        for param in self.parameters():
-            param.requires_grad = False
-        for param in self.classfier.parameters():
-            param.requires_grad = True
+        freeze = learning_param.get("freeze", False)
+        if freeze:
+            for param in self.parameters():
+                param.requires_grad = False
+            for param in self.classfier.parameters():
+                param.requires_grad = True
         self.train()
-        dataset = DictDataset(train_x, train_y, candidate_token_dict)
+        dataset = DictDataset(train_x, train_y, candidate_token_dict, first_token_dict)
         num_epochs = learning_param.get("num_epochs", 20)
         batch_size = learning_param.get("batch_size", 2)
         beta1 = learning_param.get("beta1", 0.9)
-        weight_decay = learning_param.get("weight_decay", 0)
+        weight_decay = learning_param.get("weight_decay", 1e-4)
         lr = learning_param.get("lr", 1e-4)
         agg = learning_param.get("agg", "last")
-        class_loss_fn = nn.NLLLoss()
-        collate_fn = self.get_collate_fn()
+        self.agg = agg
+        class_loss_fn = nn.CrossEntropyLoss()
+        collate_fn = self.get_collate_fn(enable_attn=self.enable_attn)
         train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), 
                                      lr=lr, 
                                      betas=(beta1, 0.999), 
-                                     weight_decay=weight_decay)
+                                     weight_decay=weight_decay
+                                     )
         loss_list = list()
         for epoch in (range(num_epochs)):
             total_loss = 0
             inst_counter = 0
-            for x, y in train_loader:
-                if x.shape[1] == 1:
-                    # The input has only one element. Skip this iteration.
-                    continue
+            for item in train_loader:
+                x = item[0]
+                y = item[1]
+                if first_token_dict is not None:
+                    first_token = item[2]
+                else:
+                    first_token = None
                 optimizer.zero_grad()
                 x = x.to(self.device)
                 y = y.to(self.device)
                 length = (y >= 0).sum(dim=-1) 
                 class_label = ((y > 0).sum(dim=-1) > 0).long()
-                ranking_output, class_scores = self.forward_both(x, length=length, agg=agg)
+                ranking_output, class_scores = self.forward_both(x, length=length, first_token=first_token)
                 class_loss = class_loss_fn(class_scores, class_label)
                 class_loss.backward()
                 optimizer.step()
@@ -704,9 +770,14 @@ class RankNet(nn.Module):
         self.eval()
         return loss_list
     
-    def get_collate_fn(self, fillvalue=-1):
+    def get_collate_fn(self, fillvalue=-1, enable_attn=False):
         def collate_fn(batch):
-            x, y, candidate_token = zip(*batch)
+            if not enable_attn:
+                x, y, candidate_token = zip(*batch)
+                first_token = None
+            else:
+                x, y, candidate_token, first_token = zip(*batch)
+                first_token = torch.stack(first_token)
             #lengths = [len(seq) for seq in x]
             rank_y = []
             for idx, item in enumerate(y):
@@ -722,13 +793,17 @@ class RankNet(nn.Module):
             
             padded_x = pad_sequence(x, batch_first=True, padding_value=-1)
             
-            return padded_x, padded_rank_y
+            if first_token is not None:
+                return padded_x, padded_rank_y, first_token
+            else:
+                return padded_x, padded_rank_y
         return collate_fn
     
     def predict(self, x, first_token=None):
         with torch.inference_mode():
             x = x.to(self.device)
-            first_token = first_token.to(self.device)
+            if first_token is not None:
+                first_token = first_token.to(self.device)
             if self.enable_classifier:
                 ranking_output, class_scores = self.forward_both(x, first_token=first_token)
                 ranking_output = ranking_output.cpu()
@@ -760,6 +835,8 @@ class RankNet(nn.Module):
         enable_classifier = loaded_info["meta"].get("enable_classifier", False)
         drop_out_rate = loaded_info["meta"].get("drop_out_rate", 0)
         code_num = loaded_info["meta"].get("code_num", 32)
+        agg = loaded_info["meta"].get("agg", "last")
+        act = loaded_info["meta"].get("act", "relu")
         parameter_dict = {
             "n_inputs": n_inputs,
             "layer_num": layer_num,
@@ -770,7 +847,9 @@ class RankNet(nn.Module):
             "enable_ln": enable_ln,
             "enable_classifier": enable_classifier,
             "drop_out_rate": drop_out_rate,
-            "code_num": code_num
+            "code_num": code_num,
+            "agg": agg,
+            "act": act
         }
         if device is not None:
             parameter_dict["device"] = device
@@ -791,7 +870,9 @@ class RankNet(nn.Module):
                 "enable_ln": self.enable_ln,
                 "enable_classifier": self.enable_classifier,
                 "drop_out_rate": self.drop_out_rate,
-                "code_num": self.code_num
+                "code_num": self.code_num,
+                "agg": self.agg,
+                "act": self.act
             },
             "state_dict": self.state_dict()
         }, path)
