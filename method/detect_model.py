@@ -414,6 +414,8 @@ class EncoderClassifier(RiskPredictor):
             loaded_info = torch.load(info)
         model = cls()
         model.clf = loaded_info["model"]
+        if isinstance(model.clf, dict):
+            model.clf = RankNet.load_from_memory(model.clf)
         model.fit_model_param = loaded_info["param"]
         model.model_type = loaded_info["model_type"]
         model.dim_red = loaded_info["dim_red"]

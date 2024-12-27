@@ -210,57 +210,6 @@ def load_gt(data_source, dataset_list, data_path_list, important_label_path_list
         data_line_token_pair[2].append(important_token_info)
     return data_line_token_pair
 
-def load_from_existing_data_old(training_data_path,
-                            mode, 
-                            pass_mode, 
-                            dataset_list, 
-                            data_line_token_pair,
-                            encoder,
-                           ):
-    training_data = torch.load(training_data_path)
-    train_x = []
-    train_y = []
-    snapshot_x = training_data["snapshot_x"]
-    store_y = training_data["store_y"]
-    first_token_info = training_data["first_token"]
-    candidate_token_dict = training_data["candidate_token_dict"]
-    if pass_mode == "dict":
-        train_x = {key: {} for key in dataset_list}
-        train_y = {key: {} for key in dataset_list}
-    for idx, dataset_name in enumerate(dataset_list):
-        for key in snapshot_x[dataset_name]:
-            data = data_line_token_pair[0][idx]
-            if key not in data:
-                continue
-            snap_shot_single = snapshot_x[dataset_name][key]
-            #first_token_dict = first_token_info[0][dataset_name][key]
-            # This is only for HumanEval and SAFIM
-            #candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=[[0, len(data[key]["str_output"])]]) 
-            #input_token_length = data[key]["input_length"]
-            if mode == "lbl":
-                #al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-                if pass_mode == "dict":
-                    train_x[dataset_name][key] = torch.stack(snap_shot_single)
-                else:
-                    train_x += [i for i in snap_shot_single]
-            elif (mode == "sae" or mode =="ae") or mode == "internal_only":
-                #latent_activations, _ = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, encoder).numpy()
-                with torch.inference_mode():
-                    snap_shot_single = torch.from_numpy(snap_shot_single)
-                    if (mode == "sae" or mode =="ae"):
-                        latent_activations, info = encoder.encode(snap_shot_single.to(encoder.device))
-                    elif mode == "internal_only":
-                        latent_activations = snap_shot_single
-                    if pass_mode == "dict":
-                        train_x[dataset_name][key] = latent_activations.cpu()
-                    else:
-                        train_x += [i for i in latent_activations]
-            if pass_mode == "dict":
-                train_y[dataset_name][key] = store_y[dataset_name][key]
-            else:
-                train_y += store_y[dataset_name][key]
-    return train_x, train_y, first_token_info[0], first_token_info[1], candidate_token_dict
-
 def load_from_existing_data(training_data_path,
                             mode, 
                             #pass_mode, 
@@ -334,7 +283,7 @@ def main(
     training_data_folder: Annotated[Path, typer.Option()] = None,
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
     encoder_path: Annotated[Path, typer.Option()] = None,
-    agg: Annotated[str, typer.Option()] = None,
+    agg: Annotated[str, typer.Option()] = None, # agg is used to indicate the aggregation method for hidden states used in classification mode.
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
@@ -358,8 +307,8 @@ def main(
         encoder_path = config_dict['task_config'].get("encoder_path", None)
     collect_type = config_dict["task_config"]['collect_type']
     mode = config_dict["task_config"]['mode']
-    random_sample = config_dict["task_config"].get("random_sample", None)
-    additional_prompt = config_dict["task_config"].get("additional_prompt", "")
+    #random_sample = config_dict["task_config"].get("random_sample", None)
+    #additional_prompt = config_dict["task_config"].get("additional_prompt", "")
     dataset_list = config_dict["task_config"].get("dataset_list", ["humaneval"])
     data_source = config_dict["task_config"].get("data_source", ["shelve"])
     important_label_path_list = config_dict["task_config"].get("important_label_path_list", [None])
@@ -431,10 +380,20 @@ def main(
         if os.path.exists(cur_data_path):
             logger.info(f"Load {collect_type} training data from {cur_data_path}")
             cur_train_x, cur_train_y, cur_first_token_dict, cur_first_token_in_dict, cur_candidate_token_dict = load_from_existing_data(cur_data_path, 
-                                                                                                                                        mode, 
-                                                                                                                                        pass_mode, 
+                                                                                                                                        mode,
                                                                                                                                         #data_line_token_pair[data_class_idx], 
                                                                                                                                         encoder)
+            if agg is None:
+                # Line Level prediction mode
+                # Keeps the same with semantic_binding_rank.py
+                iter_list = list(cur_train_y.keys())
+                for key in iter_list:
+                    # The entire code is correct
+                    if sum(cur_train_x[key]) == 0:
+                        cur_train_x.pop(key)
+                        cur_train_y.pop(key)
+                        cur_first_token_dict.pop(key)
+                        cur_candidate_token_dict.pop(key)
             if agg is not None:
                 for key in cur_train_x:
                     cur_train_x[key] = aggregate_feature(cur_train_x[key], agg) # (L, hidden_dim) --> (hidden_dim)

@@ -823,6 +823,41 @@ class RankNet(nn.Module):
     
 
     @classmethod
+    def load_from_memory(cls, loaded_info, device=None):
+        n_inputs = loaded_info["meta"]["n_inputs"]
+        layer_num = loaded_info["meta"]["layer_num"]
+        hidden_size = loaded_info["meta"]["hidden_size"]
+        enable_attn = loaded_info["meta"].get("enable_attn", False)
+        enable_res = loaded_info["meta"].get("enable_res", False)
+        enable_mlb = loaded_info["meta"].get("enable_mlb", False)
+        enable_ln = loaded_info["meta"].get("enable_ln", False)
+        enable_classifier = loaded_info["meta"].get("enable_classifier", False)
+        drop_out_rate = loaded_info["meta"].get("drop_out_rate", 0)
+        code_num = loaded_info["meta"].get("code_num", 32)
+        agg = loaded_info["meta"].get("agg", None)
+        act = loaded_info["meta"].get("act", "relu")
+        parameter_dict = {
+            "n_inputs": n_inputs,
+            "layer_num": layer_num,
+            "hidden_size": hidden_size,
+            "enable_attn": enable_attn,
+            "enable_res": enable_res,
+            "enable_mlb": enable_mlb,
+            "enable_ln": enable_ln,
+            "enable_classifier": enable_classifier,
+            "drop_out_rate": drop_out_rate,
+            "code_num": code_num,
+            "act": act
+        }
+        if device is not None:
+            parameter_dict["device"] = device
+        model = cls(**parameter_dict)
+        model.load_state_dict(loaded_info["state_dict"])
+        #model.encoder = encoder.to(device)
+        model.agg = agg
+        return model
+    
+    @classmethod
     def load(cls, path, device=None):
         loaded_info = torch.load(path)
         n_inputs = loaded_info["meta"]["n_inputs"]
@@ -858,8 +893,8 @@ class RankNet(nn.Module):
         #model.encoder = encoder.to(device)
         return model
     
-    def save(self, path):
-        torch.save({
+    def pack(self):
+        return {
             "meta": {
                 "n_inputs": self.n_inputs,
                 "layer_num": self.layer_num,
@@ -875,5 +910,8 @@ class RankNet(nn.Module):
                 "act": self.act
             },
             "state_dict": self.state_dict()
-        }, path)
+        }
+        
+    def save(self, path):
+        torch.save(self.pack(), path)
     
