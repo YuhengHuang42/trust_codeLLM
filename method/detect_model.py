@@ -25,6 +25,20 @@ from method.rank_util import DictDataset, RankNet, ScaledDotProductAttention, co
 PADDED_Y_VALUE = -1
 DEFAULT_EPS = 1e-5
 
+def aggregate_feature(feature, agg):
+    if isinstance(feature, list):
+        feature = np.array(feature)
+    if len(feature.shape) == 2:
+        if agg == "mean":
+            return np.mean(feature, axis=0)
+        elif agg == "last":
+            return feature[-1]
+    elif len(feature.shape) == 3:
+        if agg == "mean":
+            return np.mean(feature, axis=1)
+        elif agg == "last":
+            return feature[:, -1]
+    
 def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, numeric_stability=1e-7):
     """
     Collect features as hallucination detection mentioned in the paper.
@@ -332,6 +346,7 @@ class EncoderClassifier(RiskPredictor):
         self.hidden_first = None
         self.encoder = None
         self.sorting_code = False
+        self.agg = None
         
     def fit(self,
             train_info,  
@@ -339,10 +354,12 @@ class EncoderClassifier(RiskPredictor):
             fit_model_param,
             encoder,
             vector_norm=False,
-            external_proj=None 
+            external_proj=None,
+            agg = None 
             ):
         self.fit_model_param = fit_model_param
         self.vector_norm = vector_norm
+        self.agg = agg
         already_norm = False
         train_x = train_info["train_x"]
         train_y = train_info["train_y"]
@@ -401,7 +418,8 @@ class EncoderClassifier(RiskPredictor):
                      "encoder_type": encoder_type,
                      "sorting_code": self.sorting_code,
                      "vector_norm": self.vector_norm,
-                     "external_dim_red_flag": self.external_dim_red_flag
+                     "external_dim_red_flag": self.external_dim_red_flag,
+                     "agg": self.agg
                      }, 
                     path
                     )
@@ -422,6 +440,8 @@ class EncoderClassifier(RiskPredictor):
         device = loaded_info["device"]
         model.sorting_code = loaded_info["sorting_code"] if "sorting_code" in loaded_info else False
         encoder_type = loaded_info.get("encoder_type", "Autoencoder")
+        agg = loaded_info.get("agg", None)
+        model.agg = agg
         if loaded_info["encoder"] is not None:
             if encoder_type == "Autoencoder":
                 encoder = Autoencoder.from_state_dict(loaded_info["encoder"])
@@ -461,6 +481,15 @@ class EncoderClassifier(RiskPredictor):
         if latent is None:
             latent = before_enc # No encoder is provided. Internal-only mode
         latent = latent.numpy().astype(np.float32)
+        if self.agg is not None and self.model_type != "ranker":
+            # ranker will process aggregation internally.
+            if len(latent.shape) == 3:
+                batch_size = latent.shape[0]
+            else:
+                batch_size = 1
+            latent = aggregate_feature(latent, self.agg)
+            latent = latent.reshape(batch_size, -1)
+            
         self.cache = before_enc.numpy().astype(np.float32)
         if self.sorting_code:
             latent = obtain_sorted_code(latent, self.encoder.activation.k)
@@ -558,6 +587,8 @@ class LBLRegression():
         self.model_type = None
         self.cache = None
         self.hidden_first = None
+        self.agg = None
+        self.hidden_first = None
         
     def fit(self, train_info, model_type, fit_model_param, attn_layer):
         self.fit_model_param = fit_model_param
@@ -575,7 +606,11 @@ class LBLRegression():
             self.clf = LSTMPredictor(**fit_model_param).fit(train_x, train_y)
         
     def save(self, path):
-        joblib.dump({"model": self.clf, "param": self.fit_model_param, "attn_layer": self.attn_layer, "model_type": self.model_type}, path)
+        joblib.dump({"model": self.clf, 
+                     "param": self.fit_model_param, 
+                     "attn_layer": self.attn_layer, 
+                     "model_type": self.model_type,
+                     "agg": self.agg}, path)
     
     @classmethod
     def load(cls, path):
@@ -585,14 +620,17 @@ class LBLRegression():
         model.fit_model_param = loaded_info["param"]
         model.attn_layer = loaded_info["attn_layer"]
         model.model_type = loaded_info["model_type"]
+        model.agg = loaded_info.get("agg", None)
         return model
     
-    def predict(self, attn_snapshot=None, input_token_length=None, candidate_tokens=None, x=None):
+    def predict(self, attn_snapshot=None, input_token_length=None, candidate_tokens=None, x=None, first_token=None):
         assert attn_snapshot is not None or x is not None, "Either attn_snapshot or before_enc should be provided."
         if x is None:
             al_result = collect_attention_map(attn_snapshot, self.attn_layer, input_token_length, candidate_tokens)
+            x = np.stack(al_result).astype(np.float32)
         self.cache = x
-        x = np.stack(al_result).astype(np.float32)
+        if self.agg is not None:
+            x = aggregate_feature(x, self.agg)
         y = self.clf.predict_proba(x)
 
         pred_result = y[:, 1]

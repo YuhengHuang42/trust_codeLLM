@@ -1,5 +1,3 @@
-# Lookback Lens: Detecting and Mitigating Contextual Hallucinations in Large Language Models Using Only Attention Maps
-
 import torch
 import os
 import typer
@@ -34,11 +32,6 @@ import method.semantic_binding as sb
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 
-LAYER_DICT = {
-    "Phind/Phind-CodeLlama-34B-v2": {
-        -1: "model.layers.47.self_attn"
-    }
-}
 from utility.utils import HARD_TOKEN_LIMIT
 
     
@@ -70,7 +63,6 @@ def main(
     model_name = config_dict["llm_config"]["model_name"]
     layer = config_dict["task_config"]["layer"]
     training_data_path_name = config_dict["task_config"]["training_data_path_name"]
-    fit_model_param = config_dict["task_config"].get("fit_model_param", {})
     if encoder_path is None:
         encoder_path = config_dict['task_config']["encoder_path"]
     collect_type = config_dict["task_config"]['collect_type']
@@ -192,8 +184,8 @@ def main(
 
     
     if agg is None:
-        # Line Level prediction mode
-        # Keeps the same with semantic_binding.py
+        # Ranking loss is not well-defined
+        # for correct code snippet, we remove them from the training data
         iter_list = list(train_y.keys())
         for key in iter_list:
             if sum(train_y[key]) == 0:

@@ -30,6 +30,7 @@ from task import safim
 import method.detect_model as detect_model
 from method.detect_model import LBLRegression, EncoderClassifier, collect_attention_map, collect_hidden_states, flat_data_dict
 from method.extract import extract_util
+from method.detect_model import aggregate_feature
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 
@@ -229,7 +230,7 @@ def load_from_existing_data(training_data_path,
         #if key not in data:
         #    continue
         snap_shot_single = snapshot_x[key]
-        first_token_single = first_token_info[0][key]
+        first_token_single = first_token_info[0][key] if key in first_token_info[0] else None
         #first_token_dict = first_token_info[0][dataset_name][key]
         # This is only for HumanEval and SAFIM
         #candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, language, code_blocks_info=[[0, len(data[key]["str_output"])]]) 
@@ -264,15 +265,6 @@ def load_from_existing_data(training_data_path,
         #else:
         #    train_y += store_y[key]
     return train_x, train_y, first_token_info[0], first_token_info[1], candidate_token_dict
-
-def aggregate_feature(feature, agg):
-    if isinstance(feature, list):
-        feature = np.array(feature)
-    assert len(feature.shape) == 2
-    if agg == "mean":
-        return np.mean(feature, axis=0)
-    elif agg == "last":
-        return feature[-1]
     
 @app.command()
 def main(
@@ -339,8 +331,12 @@ def main(
         encoder_param = torch.load(encoder_path)
         encoder = sae_model.NaiveAutoEncoder.from_state_dict(encoder_param["model_state_dict"])
     else:
+        logger.info("No encoder is used.")
         encoder = None
 
+    if agg is not None:
+        logger.info("Use aggregation method: {}".format(agg))
+        
     if external_proj_path is not None:
         external_proj = detect_model.SupervisedPrjection.load(external_proj_path)
         logger.info(f"Load external projection from {external_proj_path}")
@@ -383,17 +379,17 @@ def main(
                                                                                                                                         mode,
                                                                                                                                         #data_line_token_pair[data_class_idx], 
                                                                                                                                         encoder)
-            if agg is None:
+            #if agg is None:
                 # Line Level prediction mode
                 # Keeps the same with semantic_binding_rank.py
-                iter_list = list(cur_train_y.keys())
-                for key in iter_list:
+            #    iter_list = list(cur_train_y.keys())
+            #    for key in iter_list:
                     # The entire code is correct
-                    if sum(cur_train_x[key]) == 0:
-                        cur_train_x.pop(key)
-                        cur_train_y.pop(key)
-                        cur_first_token_dict.pop(key)
-                        cur_candidate_token_dict.pop(key)
+            #        if sum(cur_train_y[key]) == 0:
+            #            cur_train_x.pop(key)
+            #            cur_train_y.pop(key)
+            #            cur_first_token_dict.pop(key)
+            #            cur_candidate_token_dict.pop(key)
             if agg is not None:
                 for key in cur_train_x:
                     cur_train_x[key] = aggregate_feature(cur_train_x[key], agg) # (L, hidden_dim) --> (hidden_dim)
@@ -471,11 +467,18 @@ def main(
                 candidate_token_dict[data_class_name][key] = candidate_tokens
                 if mode == "lbl":
                     al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-                    snapshot_x[data_class_name][key] = al_result
+                    al_result = torch.stack(al_result)
+                    snapshot_x[data_class_name][key] = al_result.tolist()
                     if pass_mode == "dict":
-                        train_x[data_class_name][key] = torch.stack(al_result)
+                        if agg is None:
+                            train_x[data_class_name][key] = al_result
+                        else:
+                            train_x[data_class_name][key] = aggregate_feature(al_result, agg)
                     else:
-                        train_x += [i for i in al_result]
+                        if agg is None:
+                            train_x += [i for i in al_result]
+                        else:
+                            train_x.append(aggregate_feature(al_result, agg))
                 elif (mode == "sae" or mode =="ae") or mode == "internal_only":
                     _, before_latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, None)
                     first_token_dict[data_class_name][key] = snap_shot_single[input_token_length]
@@ -547,7 +550,7 @@ def main(
         clf.fit(train_info, model_type, fit_model_param, layer)
     elif (mode == "sae" or mode =="ae") or mode == "internal_only":
         clf = EncoderClassifier()
-        clf.fit(train_info, model_type, fit_model_param, encoder, vector_norm=vector_norm, external_proj=external_proj)
+        clf.fit(train_info, model_type, fit_model_param, encoder, vector_norm=vector_norm, external_proj=external_proj, agg=agg)
     clf.save(model_save_path)
     #accuracy, pred_profiler = clf.evaluate(train_x, train_y)
     #logger.info(f"Accuracy on training data: {accuracy}")

@@ -25,6 +25,7 @@ from method import detect_model
 from method.detect_model import AttentionModule, ScaledDotProductAttention, RankNet
 import utility.utils as utils
 from task import dataset_utils
+from method.semantic_binding import LAYER_DICT
 
 STORE = 0
 LOAD = 1
@@ -151,7 +152,10 @@ def evaluate_binding(data,
                     logger.info(f"Out of Memory error occurred for key: {key}. Moving to next.")
                     continue
             before_act_dict[key] = copy.deepcopy(detection_model.cache.astype(np.float16))
-            first_token_info_dict[key] = copy.deepcopy(detection_model.hidden_first.to(torch.float16))
+            if detection_model.hidden_first is not None:
+                first_token_info_dict[key] = copy.deepcopy(detection_model.hidden_first.to(torch.float16))
+            else:
+                first_token_info_dict[key] = None
         else:
             if key not in before_act_dict:
                 continue
@@ -212,6 +216,8 @@ def main(
     extract_code = config_dict["task_config"]["extract_code"]
     collect_type = config_dict["task_config"]['collect_type']
     assert collect_type in ["attention", "hidden"]
+    if collect_type == "attention":
+        layer = LAYER_DICT[model_name][layer]
     assert mode in ["lbl", "sae", "uncertainty", "internal_only"]
     if mode == "internal_only":
         mode = "sae" # SAE and Internal_only share the same interface, the difference is that the latter does not have encoder.
