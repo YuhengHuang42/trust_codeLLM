@@ -144,6 +144,10 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
 def load_tokenizer(model_name, model_path=None):
     if model_name == "Phind/Phind-CodeLlama-34B-v2":
         tokenizer = AutoTokenizer.from_pretrained(model_name)
+    elif model_name == "Qwen/Qwen2.5-Coder-32B":
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+    else:
+        raise Exception
     return tokenizer
 
 def load_opensource_model(model_name, 
@@ -154,7 +158,7 @@ def load_opensource_model(model_name,
                           user_args=None, 
                           device_map=None):
     if parallel:
-        args = {"device_map": "auto"}
+        args = {"device_map": "balanced"}
     else:
         args = {"device_map": "cpu"}
     if device_map is not None:
@@ -179,13 +183,12 @@ def load_opensource_model(model_name,
         quantization_config = None
     
     tokenizer = load_tokenizer(model_name)
-    if model_name == "Phind/Phind-CodeLlama-34B-v2":
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=quantization_config,
-            **args
-        )
-        
+    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B"]
+    model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=quantization_config,
+                **args
+            )
     return (model, tokenizer)
 
 def write_jsonl(output_path, data):
