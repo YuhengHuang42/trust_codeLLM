@@ -1046,6 +1046,7 @@ def inference_and_collect(
                                                                         dataset.split_token, 
                                                                         item['mutated_code']['contrastive_pair'][0]
                                                                 )
+        input_info["input_ids"] = input_info["input_ids"].to(recorder.model.device)
         if run_original:
             _, record_dict = recorder.forward(input_info)
             
@@ -1115,8 +1116,8 @@ def inference_and_collect(
         
 # python3 method/collect_hidden_aug.py --config-file model_eval_config/CodeLlama_hidden_state.yaml --result-output-path /data/data_disk/trust_code/leetcode_aug3_fix
 # python3 method/collect_hidden_aug.py --config-file model_eval_config/CodeLlama_hidden_state_tracer.yaml --result-output-path /data/data_disk/trust_code/tracer
-#app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
-app = typer.Typer(pretty_exceptions_short=False)
+app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
+#app = typer.Typer(pretty_exceptions_short=False)
 @app.command()
 def main(
     config_file: Annotated[Path, typer.Option()],

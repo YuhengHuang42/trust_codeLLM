@@ -176,7 +176,7 @@ def load_opensource_model(model_name,
             load_in_8bit=True,
         )
     elif quantization == "16bit":
-        args["torch_dtype"] = torch.bfloat16
+        args["torch_dtype"] = torch.float16 #torch.bfloat16
         quantization_config = None
     else:
         quantization_config = None
