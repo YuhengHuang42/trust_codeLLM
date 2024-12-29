@@ -142,12 +142,8 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
 
 
 def load_tokenizer(model_name, model_path=None):
-    if model_name == "Phind/Phind-CodeLlama-34B-v2":
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-    elif model_name == "Qwen/Qwen2.5-Coder-32B":
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-    else:
-        raise Exception
+    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "bigcode/starcoder2-15b"]
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     return tokenizer
 
 def load_opensource_model(model_name, 
@@ -167,7 +163,7 @@ def load_opensource_model(model_name,
         args.update(user_args)
     if cache_dir is not None:
         args["cache_dir"] = cache_dir
-    assert quantization in [None, "8bit", "4bit"]
+    assert quantization in [None, "8bit", "4bit", "16bit"]
     if quantization == "4bit":
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -179,11 +175,14 @@ def load_opensource_model(model_name,
         quantization_config = BitsAndBytesConfig(
             load_in_8bit=True,
         )
+    elif quantization == "16bit":
+        args["torch_dtype"] = torch.bfloat16
+        quantization_config = None
     else:
         quantization_config = None
     
     tokenizer = load_tokenizer(model_name)
-    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B"]
+    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "bigcode/starcoder2-15b"]
     model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 quantization_config=quantization_config,

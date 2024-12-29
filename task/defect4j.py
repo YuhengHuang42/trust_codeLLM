@@ -182,10 +182,10 @@ class Defects4jDataset(CodeDataset):
         return prompt, self.problems[bug_id]['buggy']
     
     def get_buggy_code(self, idx):
-        return self.clean_dataset[self.index[idx]]['buggy']
+        return self.problems[self.index[idx]]['buggy']
 
     def get_fix_code(self, idx):
-        return self.clean_dataset[self.index[idx]]['fix']
+        return self.problems[self.index[idx]]['fix']
         
     def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
         bug_id = self.index[problem_id]

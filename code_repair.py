@@ -66,7 +66,7 @@ def evaluate(llm,
         #    code_correctness = dataset.check_result(code, idx)
         code_correctness = dataset.check_result(code, idx)
         generate_result["code_correctness"] = code_correctness
-        generate_result["problem"] = {"code": dataset.get_buggy_func(idx), 
+        generate_result["problem"] = {"code": dataset.get_buggy_code(idx), 
                                       "prompt": prompt, 
                                       "gt": dataset.get_fix_code(idx)
                                       } 

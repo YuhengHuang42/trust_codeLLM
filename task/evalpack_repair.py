@@ -21,7 +21,7 @@ class HumanEvalPackRepair(CodeDataset):
     def __len__(self):
         return len(self.problems)
     
-    def get_buggy_func(self, index):
+    def get_buggy_code(self, index):
         return self.problems[index]['buggy_solution']
 
     def get_fix_code(self, idx):
