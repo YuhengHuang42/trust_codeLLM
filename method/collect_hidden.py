@@ -184,6 +184,7 @@ def inference_and_collect(
         input_info = tokenizer(target_input, return_tensors="pt", return_offsets_mapping=True)
         offset_mapping = input_info["offset_mapping"].squeeze().tolist()
         input_info.pop("offset_mapping")
+        input_info["input_ids"] = input_info["input_ids"].to(recorder.model.device)
         split_tok_pos = list()
         for pos in item['output']['code_split_pos']:
             real_pos = pos + context_str_len

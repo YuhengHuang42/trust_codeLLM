@@ -1078,6 +1078,7 @@ def inference_and_collect(
                                                                                  dataset.split_token,
                                                                                  item['mutated_code']['contrastive_pair'][1]
                                                                                  )
+        input_info["input_ids"] = input_info["input_ids"].to(recorder.model.device)
         _, record_dict = recorder.forward(input_info)
         
         hidden_states = record_dict[list(recorder.layer_names.keys())[0]] # Only one layer
