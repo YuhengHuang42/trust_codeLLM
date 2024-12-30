@@ -105,8 +105,8 @@ def postprocess_record(record, stop_sequences, tokenizer):
 def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tokens": 600}, extra_generation_config=None, remove_seq_list=None):
     # https://huggingface.co/docs/transformers/v4.44.2/en/main_classes/text_generation#transformers.GenerationMixin.generate
     # https://huggingface.co/docs/transformers/v4.44.2/en/main_classes/text_generation#transformers.GenerationConfig
-    
-    inputs = tokenizer(input_str, return_tensors="pt", max_length=tokenizer.model_max_length, truncation=True).to(llm.device)
+    max_length = min(tokenizer.model_max_length, HARD_TOKEN_LIMIT)
+    inputs = tokenizer(input_str, return_tensors="pt", max_length=max_length, truncation=True).to(llm.device)
     input_length = inputs["input_ids"].shape[-1]
     result = {"input_length": input_length}
     if "return_dict_in_generate" in generate_config:
@@ -142,7 +142,7 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
 
 
 def load_tokenizer(model_name, model_path=None):
-    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "bigcode/starcoder2-15b"]
+    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "bigcode/starcoder2-15b", "deepseek-ai/deepseek-coder-33b-base"]
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return tokenizer
 
@@ -182,7 +182,7 @@ def load_opensource_model(model_name,
         quantization_config = None
     
     tokenizer = load_tokenizer(model_name)
-    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "bigcode/starcoder2-15b"]
+    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "bigcode/starcoder2-15b", "deepseek-ai/deepseek-coder-33b-base"]
     model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 quantization_config=quantization_config,
