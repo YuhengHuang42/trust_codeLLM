@@ -115,7 +115,7 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
         output = llm.generate(
             **inputs,
             pad_token_id=tokenizer.eos_token_id,
-            tokenizer=tokenizer,
+            #tokenizer=tokenizer,
             **generate_config,
             generation_config=extra_generation_config
         )
