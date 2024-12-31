@@ -11,9 +11,9 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
-CODE_NOT_FOUND_FLAG = "NO_CODE"
 
 import utility.utils as utils
+from utility.utils import CODE_NOT_FOUND_FLAG
 from task.safim import SAFIMDataset
 import task.dataset_utils as dataset_utils
 # We by default use parallel for LLM loading based on all available GPUS.

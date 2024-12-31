@@ -11,7 +11,7 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
-CODE_NOT_FOUND_FLAG = "NO_CODE"
+from utility.utils import CODE_NOT_FOUND_FLAG
 
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs

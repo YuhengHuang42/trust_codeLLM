@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .dataset_utils import CodeDataset
 from utility import utils
+from utility.utils import CODE_NOT_FOUND_FLAG
 
 CODE_MARKER = r"{{Code}}"
 
@@ -83,6 +84,14 @@ class EditEvalDataset(CodeDataset):
         return result
     
     def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False, replace_func_name_attempt=True):
+        if generate_code is None:
+            result = dict(
+                    task_id=problem_id,
+                    passed=0,
+                    result=CODE_NOT_FOUND_FLAG,
+                    run_id=None,
+                )
+            return result
         result = self.check_result_single(generate_code, problem_id)
         if replace_func_name_attempt:
             if "is not defined" in result['result']:

@@ -18,7 +18,7 @@ from task.evalpack_repair import HumanEvalPackRepair
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
 
-CODE_NOT_FOUND_FLAG = "NO_CODE"
+from utility.utils import CODE_NOT_FOUND_FLAG
 
 global_eof_stops = ['// Buggy Function', '// Fixed Function', '# Buggy Function', '# Fixed Function',
                     '/* Buggy Function */', '/* Fixed Function */', '<|endoftext|>']

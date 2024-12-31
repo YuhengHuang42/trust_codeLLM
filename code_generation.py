@@ -11,15 +11,14 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
-CODE_NOT_FOUND_FLAG = "NO_CODE"
 
 import utility.utils as utils
+from utility.utils import CODE_NOT_FOUND_FLAG
 from task.human_eval import HumanEvalDataset
 from task.edit_eval import EditEvalDataset
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
 def evaluate(llm, tokenizer, dataset, generate_config, save_path, task):
-    import utility.utils as utils
     generate_config = copy.deepcopy(generate_config)
     if "prompt" in generate_config:
         system_prompt = generate_config.pop("prompt") + "\n    "

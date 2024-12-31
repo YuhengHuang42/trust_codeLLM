@@ -13,6 +13,7 @@ import difflib
 from loguru import logger
 
 HARD_TOKEN_LIMIT = 4096 - 512
+CODE_NOT_FOUND_FLAG = "NO_CODE"
 
 def match_token_in_offset_mapping(offset_mapping, start_pos, end_pos):
     """
