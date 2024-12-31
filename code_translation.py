@@ -8,6 +8,7 @@ import tqdm
 import copy
 import shelve
 import os
+from transformers import GenerationConfig
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
@@ -15,7 +16,10 @@ from utility.utils import CODE_NOT_FOUND_FLAG
 
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
-def evaluate(llm, tokenizer, dataset, generate_config, save_path):
+
+global_eof_stops = ['```', '<|endoftext|>', '</s>', '<｜end▁of▁sentence｜>']
+
+def evaluate(llm, tokenizer, dataset, generate_config, save_path, ext_gen_config=None):
     import utility.utils as utils
     generate_config = copy.deepcopy(generate_config)
     prompt = generate_config.pop("prompt")
@@ -28,7 +32,8 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path):
             llm,
             tokenizer,
             input_str,
-            generate_config=generate_config
+            generate_config=generate_config,
+            extra_generation_config=ext_gen_config,
         )
         # Evaluate the code
         code_blocks, code_blocks_info = utils.extract_code_block(generate_result['str_output'])
@@ -72,13 +77,16 @@ def main(
     generate_config = config_dict["llm_config"]["generate_config"]
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
     
+    generation_config = GenerationConfig.from_pretrained(model_name,)
+    generation_config.stop_strings = global_eof_stops
+    
     if task == "codetlingua":
         assert "split" in config_dict["task_config"]
         dataset = CodetlinguaDataset(split=config_dict["task_config"]["split"], 
                                                    source_lang=config_dict["task_config"]["source_lang"], 
                                                    target_lang=config_dict["task_config"]["target_lang"],
                                                    )
-        evaluate(model, tokenizer, dataset, generate_config, output_path)
+        evaluate(model, tokenizer, dataset, generate_config, output_path, ext_gen_config=generation_config)
     
     end = time.time()
     logger.info(f"Total time: {end - start}")

@@ -11,6 +11,7 @@ from pygments.token import Token
 import numpy as np
 import difflib
 from loguru import logger
+import re
 
 HARD_TOKEN_LIMIT = 4096 - 512
 CODE_NOT_FOUND_FLAG = "NO_CODE"
@@ -389,6 +390,15 @@ def extract_code_block(text, select_idx=None):
     code_blocks = []
     code_blocks_info = []
     start = 0
+    
+    code_start_shift = 0
+    text_length = len(text)
+    if len(re.findall("```", text)) == 1:
+        if not text.startswith("```"):
+            text = "```\n" + text
+            code_start_shift = 4
+        elif not text.strip().endswith("```"):
+            text = text +  "\n```"
 
     while True:
         # Find the start of a code block
@@ -415,6 +425,9 @@ def extract_code_block(text, select_idx=None):
             continue
         
         code_blocks.append(code_block)
+        code_start = max(0, code_start - code_start_shift)
+        end_idx = end_idx - code_start_shift
+        end_idx = min(end_idx, text_length)
         code_blocks_info.append([code_start, end_idx])
 
     if len(code_blocks) == 0:
