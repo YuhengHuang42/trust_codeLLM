@@ -23,7 +23,7 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path):
 
     for idx, item in enumerate(tqdm.tqdm(dataset)):
         problem = item["code"]
-        input_str = prompt + problem
+        input_str = prompt + problem + "\n Your Answer is : ```"
         generate_result = utils.generate_and_record(
             llm,
             tokenizer,

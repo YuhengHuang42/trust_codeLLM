@@ -37,7 +37,9 @@ Original Code:
 ```
 {}
 ```
-Your response:\n\n"""
+Your response:\n
+```
+"""
 
 class EditEvalDataset(CodeDataset):
     def __init__(self,
