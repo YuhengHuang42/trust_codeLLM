@@ -17,9 +17,9 @@ from utility.utils import CODE_NOT_FOUND_FLAG
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
 
-global_eof_stops = ['```', '<|endoftext|>', '</s>', '<｜end▁of▁sentence｜>']
+global_eof_stops = ['<|endoftext|>', '</s>', '<｜end▁of▁sentence｜>'] # '```'
 
-def evaluate(llm, tokenizer, dataset, generate_config, save_path, ext_gen_config=None):
+def evaluate(llm, tokenizer, dataset, generate_config, save_path, extract_code=True, ext_gen_config=None):
     import utility.utils as utils
     generate_config = copy.deepcopy(generate_config)
     prompt = generate_config.pop("prompt")
@@ -27,7 +27,7 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path, ext_gen_config
 
     for idx, item in enumerate(tqdm.tqdm(dataset)):
         problem = item["code"]
-        input_str = prompt + problem + "\n Your Answer is : ```"
+        input_str = prompt + problem + "\n Your Answer is :\n "
         generate_result = utils.generate_and_record(
             llm,
             tokenizer,
@@ -36,14 +36,17 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path, ext_gen_config
             extra_generation_config=ext_gen_config,
         )
         # Evaluate the code
-        code_blocks, code_blocks_info = utils.extract_code_block(generate_result['str_output'])
-        if code_blocks is None or len(code_blocks) == 0:
-            code_correctness = CODE_NOT_FOUND_FLAG
+        if extract_code:
+            code_blocks, code_blocks_info = utils.extract_code_block(generate_result['str_output'])
+            if code_blocks is None or len(code_blocks) == 0:
+                code_correctness = CODE_NOT_FOUND_FLAG
+            else:
+                code = code_blocks[-1]
+                code_correctness = dataset.check_result(code, idx)
         else:
-            code = code_blocks[-1]
             code_correctness = dataset.check_result(code, idx)
         generate_result["code_correctness"] = code_correctness
-        generate_result["problem"] = {"code": problem, "prompt": prompt} 
+        generate_result["problem"] = {"code": problem, "prompt": input_str} 
         
         ans_recored[str(idx)] = generate_result
     
@@ -75,6 +78,7 @@ def main(
     model_name = config_dict["llm_config"]["model_name"]
     quantization = config_dict["llm_config"]["quantization"]
     generate_config = config_dict["llm_config"]["generate_config"]
+    extract_code = config_dict["llm_config"].get("extract_code", True)
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
     
     generation_config = GenerationConfig.from_pretrained(model_name,)
@@ -86,7 +90,7 @@ def main(
                                                    source_lang=config_dict["task_config"]["source_lang"], 
                                                    target_lang=config_dict["task_config"]["target_lang"],
                                                    )
-        evaluate(model, tokenizer, dataset, generate_config, output_path, ext_gen_config=generation_config)
+        evaluate(model, tokenizer, dataset, generate_config, output_path, extract_code=extract_code, ext_gen_config=generation_config)
     
     end = time.time()
     logger.info(f"Total time: {end - start}")

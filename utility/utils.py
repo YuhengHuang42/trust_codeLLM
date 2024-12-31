@@ -148,7 +148,7 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
 
 
 def load_tokenizer(model_name, model_path=None):
-    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "bigcode/starcoder2-15b", "deepseek-ai/deepseek-coder-33b-base"]
+    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "uukuguy/speechless-starcoder2-15b", "deepseek-ai/deepseek-coder-33b-base"]
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return tokenizer
 
@@ -188,7 +188,7 @@ def load_opensource_model(model_name,
         quantization_config = None
     
     tokenizer = load_tokenizer(model_name)
-    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "bigcode/starcoder2-15b", "deepseek-ai/deepseek-coder-33b-base"]
+    assert model_name in ["Phind/Phind-CodeLlama-34B-v2", "Qwen/Qwen2.5-Coder-32B", "uukuguy/speechless-starcoder2-15b", "deepseek-ai/deepseek-coder-33b-base"]
     model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 quantization_config=quantization_config,

@@ -8,6 +8,7 @@ import tqdm
 import copy
 import shelve
 import os
+from transformers import GenerationConfig
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
@@ -18,7 +19,10 @@ from task.human_eval import HumanEvalDataset
 from task.edit_eval import EditEvalDataset
 # We by default use parallel for LLM loading based on all available GPUS.
 # Use CUDA_VISIBLE_DEVICES=xxx to specify GPUs
-def evaluate(llm, tokenizer, dataset, generate_config, save_path, task):
+
+global_eof_stops = ['<|endoftext|>', '</s>', '<｜end▁of▁sentence｜>'] # '```'
+
+def evaluate(llm, tokenizer, dataset, generate_config, save_path, task, ext_gen_config=None):
     generate_config = copy.deepcopy(generate_config)
     if "prompt" in generate_config:
         system_prompt = generate_config.pop("prompt") + "\n    "
@@ -34,7 +38,8 @@ def evaluate(llm, tokenizer, dataset, generate_config, save_path, task):
             llm,
             tokenizer,
             input_str,
-            generate_config=generate_config
+            generate_config=generate_config,
+            extra_generation_config=ext_gen_config,
         )
         # Evaluate the code
         raw_but_no_special_token_ans = generate_result["str_output"]
@@ -79,14 +84,15 @@ def main(
     quantization = config_dict["llm_config"]["quantization"]
     generate_config = config_dict["llm_config"]["generate_config"]
     model, tokenizer = utils.load_opensource_model(model_name, parallel=parallel, quantization=quantization, cache_dir=cache_dir)
-    
+    generation_config = GenerationConfig.from_pretrained(model_name,)
+    generation_config.stop_strings = global_eof_stops
     if task.lower() == "humaneval":
         dataset = HumanEvalDataset()
-        evaluate(model, tokenizer, dataset, generate_config, output_path, task.lower())
+        evaluate(model, tokenizer, dataset, generate_config, output_path, task.lower(), ext_gen_config=generation_config)
     elif task.lower() == "edit_eval":
         dataset_path = config_dict["task_config"]["dataset_path"]
         dataset = EditEvalDataset(dataset_path)
-        evaluate(model, tokenizer, dataset, generate_config, output_path, task.lower())
+        evaluate(model, tokenizer, dataset, generate_config, output_path, task.lower(), ext_gen_config=generation_config)
     
     end = time.time()
     logger.info(f"Total time: {end - start}")
