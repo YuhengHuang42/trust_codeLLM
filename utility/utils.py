@@ -416,6 +416,9 @@ def extract_code_block(text, select_idx=None):
         code_blocks.append(code_block)
         code_blocks_info.append([code_start, end_idx])
 
+    if len(code_blocks) == 0:
+        return None, None
+    
     if select_idx is None:
         return code_blocks, code_blocks_info  # Return all matches if no specific index is requested
 
