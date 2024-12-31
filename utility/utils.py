@@ -113,11 +113,15 @@ def generate_and_record(llm, tokenizer, input_str, generate_config={"max_new_tok
     result = {"input_length": input_length}
     if "return_dict_in_generate" in generate_config:
         generate_config["output_logits"] = True
+    if extra_generation_config is not None:
+        pass_tokenizer = tokenizer
+    else:
+        pass_tokenizer = None
     with torch.inference_mode():
         output = llm.generate(
             **inputs,
             pad_token_id=tokenizer.eos_token_id,
-            #tokenizer=tokenizer,
+            tokenizer=pass_tokenizer,
             **generate_config,
             generation_config=extra_generation_config
         )
