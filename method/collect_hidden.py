@@ -85,6 +85,8 @@ class PretrainCodedata(Dataset):
             return_id = None
         for key in self.feature_key_list:
             codes, code_pos_infos = utils.extract_code_block(item[key])
+            if codes is None:
+                continue
             if len(codes) < 1:
             #    logger.warning(f"Code block not found in {key} of {item['id']}")
             #    logger.warning("Skip this item")
