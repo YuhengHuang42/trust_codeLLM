@@ -182,7 +182,7 @@ def load_opensource_model(model_name,
             load_in_8bit=True,
         )
     elif quantization == "16bit":
-        args["torch_dtype"] = torch.float16 #torch.bfloat16
+        args["torch_dtype"] = torch.float16 #torch.bfloat16rm
         quantization_config = None
     else:
         quantization_config = None
@@ -398,7 +398,7 @@ def extract_code_block(text, select_idx=None):
     code_start_shift = 0
     text_length = len(text)
     if len(re.findall("```", text)) == 1:
-        if not text.startswith("```"):
+        if not text.strip().startswith("```"):
             text = "```\n" + text
             code_start_shift = 4
         elif not text.strip().endswith("```"):

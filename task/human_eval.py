@@ -151,7 +151,7 @@ class HumanEval(Task):
                 min_stop_index = stop_index
         return (decoded_string[:min_stop_index], min_stop_index)
 
-    def postprocess_generation(self, generation, idx):
+    def postprocess_generation(self, generation, idx, real_prompt=None):
         """Defines the postprocessing for a LM generation.
         :param generation: str
             code generation from LM
@@ -160,7 +160,8 @@ class HumanEval(Task):
             (not used for Humaneval-Task)
         """
         prompt = self.get_prompt(self.dataset["test"][idx])
-        generation = generation[len(prompt) :]
+        start_pos = len(prompt) if real_prompt is None else len(real_prompt)
+        generation = generation[start_pos :]
         cleaned_code, min_stop_index = self._stop_at_stop_token(generation, self.stop_words)
         return (prompt + cleaned_code, min_stop_index)
 
@@ -241,6 +242,6 @@ class HumanEvalDataset(CodeDataset):
         #return score + results["pass@1"] / 2
         #return result
     
-    def postprocess(self, generate_code, problem_id):
-        code, min_stop_index = self.task.postprocess_generation(generate_code, problem_id)
+    def postprocess(self, generate_code, problem_id, real_prompt=None):
+        code, min_stop_index = self.task.postprocess_generation(generate_code, problem_id, real_prompt)
         return code, min_stop_index
