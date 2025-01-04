@@ -187,7 +187,7 @@ class Defects4jDataset(CodeDataset):
     def get_fix_code(self, idx):
         return self.problems[self.index[idx]]['fix']
         
-    def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
+    def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False, input_full_code=False):
         bug_id = self.index[problem_id]
         project = self.metadata[bug_id]["project"]
         bug = self.metadata[bug_id]["bug"]

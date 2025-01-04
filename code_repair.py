@@ -36,15 +36,23 @@ def evaluate(llm,
     import utility.utils as utils
     generate_config = copy.deepcopy(generate_config)
     #prompt = generate_config.pop("prompt")
+    prompt_template = None
+    if "prompt_template" in generate_config:
+        prompt_template_info = generate_config.pop("prompt_template")
+        prompt_template = prompt_template_info["template"]
+        instruction = prompt_template_info["instruction"]
+        response_prefix = prompt_template_info["response_prefix"]
+        
     if iter_list == None:
         iter_list = range(len(dataset))
-    
     if ext_gen_config is not None:
         stop_strings = ext_gen_config.stop_strings
     else:
         stop_strings = None
     for idx in tqdm.tqdm(iter_list):
         prompt, ref_func = dataset.get_prompt(idx)
+        if prompt_template is not None:
+            prompt = prompt_template.format(instruction, prompt, response_prefix)
         max_new_tokens = int(2*len(tokenizer.encode(ref_func, return_tensors='pt', add_special_tokens=False)[0])) # reference:
         max_token_all = len(tokenizer.encode(prompt, return_tensors='pt')[0]) + max_new_tokens
         if max_token_all > HARD_TOKEN_LIMIT:
@@ -60,11 +68,14 @@ def evaluate(llm,
         )
         # Evaluate the code
         code = generate_result['str_output']
+        if prompt_template is not None:
+            code_blocks, code_blocks_info = utils.extract_code_block(code)
+            code = code_blocks[0]
         #if code is None:
         #    code_correctness = CODE_NOT_FOUND_FLAG
         #else:
         #    code_correctness = dataset.check_result(code, idx)
-        code_correctness = dataset.check_result(code, idx)
+        code_correctness = dataset.check_result(code, idx, input_full_code=(prompt_template is not None))
         generate_result["code_correctness"] = code_correctness
         generate_result["problem"] = {"code": dataset.get_buggy_code(idx), 
                                       "prompt": prompt, 

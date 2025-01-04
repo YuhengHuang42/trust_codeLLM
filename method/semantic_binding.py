@@ -207,7 +207,7 @@ def load_gt(data_source, dataset_list, data_path_list, important_label_path_list
                 error_line_info.pop(key)
         data_line_token_pair[0].append(data)
         data_line_token_pair[1].append(error_line_info)
-        target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
+        target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer, language="python")
         data_line_token_pair[2].append(important_token_info)
     return data_line_token_pair
 
@@ -293,6 +293,7 @@ def main(
         cache_dir = None
     model_name = config_dict["llm_config"]["model_name"]
     layer = config_dict["task_config"]["layer"]
+    extract_code_list = config_dict["task_config"]["extract_code_list"]
     training_data_path_name = config_dict["task_config"]["training_data_path_name"]
     fit_model_param = config_dict["task_config"].get("fit_model_param", {})
     if encoder_path is None:
@@ -455,7 +456,14 @@ def main(
                 snap_shot = get_hidden_snapshot(model, layer, data)
             label_dict = dict()
             for key in data.keys():
-                candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
+                extract_code = extract_code_list[data_class_idx]
+                if extract_code:
+                    code_blocks_info = None
+                else:
+                    code_blocks_info = [[0, len(data[key]["str_output"])]]
+                candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=code_blocks_info)
+                if candidate_tokens is None:
+                    continue
                 if key in important_token_info:
                     labels = utils.label_seg(important_token_info[key], candidate_tokens)
                 else:

@@ -233,7 +233,7 @@ def main(
             continue
         if data[key]["code_correctness"] == 'correct':
             continue
-        if len(error_line_info[key][0]) == 0:
+        if len(error_line_info[key]) == 0 or len(error_line_info[key][0]) == 0:
             logger.info("No error info for key: {}".format(key))
             continue
         evaluate_key_list.append(key)

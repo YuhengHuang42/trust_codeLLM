@@ -39,8 +39,11 @@ class HumanEvalPackRepair(CodeDataset):
         prompt = f"{declaration}\n{buggy_code}\n{example_test}\n{instruction}\n\ndef {signature}:\n"
         return prompt, correct
         
-    def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False):
-        full_code = self.problems[problem_id]['declaration'] + generate_code
+    def check_result(self, generate_code, problem_id: int, completion_id=1, output_error_case=False, input_full_code=False):
+        if not input_full_code:
+            full_code = self.problems[problem_id]['declaration'] + generate_code
+        else:
+            full_code = generate_code
         results, _ = self.code_metric.compute(
             references = [self.problems[problem_id]['test']],
             predictions = [[full_code]]

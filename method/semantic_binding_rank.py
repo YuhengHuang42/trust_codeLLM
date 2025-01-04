@@ -31,6 +31,7 @@ from method.extract import extract_util
 import method.semantic_binding as sb
 
 app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
+#app = typer.Typer(pretty_exceptions_short=False)
 
 from utility.utils import HARD_TOKEN_LIMIT
 
@@ -68,6 +69,7 @@ def main(
     collect_type = config_dict["task_config"]['collect_type']
     dataset_list = config_dict["task_config"].get("dataset_list", ["humaneval"])
     data_source = config_dict["task_config"].get("data_source", ["shelve"])
+    extract_code_list = config_dict["task_config"]["extract_code_list"]
     important_label_path_list = config_dict["task_config"].get("important_label_path_list", [None])
     data_path_list = config_dict["task_config"]['data_path_list']
     
@@ -151,7 +153,14 @@ def main(
             snap_shot = sb.get_hidden_snapshot(model, layer, data)
             label_dict = dict()
             for key in data.keys():
-                candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=[[0, len(data[key]["str_output"])]]) # This is only for HumanEval
+                extract_code = extract_code_list[data_class_idx]
+                if extract_code:
+                    code_blocks_info = None
+                else:
+                    code_blocks_info = [[0, len(data[key]["str_output"])]]
+                candidate_tokens = dataset_utils.get_candidate_tokens(data, key, tokenizer, "python", code_blocks_info=code_blocks_info)
+                if candidate_tokens is None:
+                    continue
                 if key in important_token_info:
                     labels = utils.label_seg(important_token_info[key], candidate_tokens)
                 else:
@@ -169,6 +178,7 @@ def main(
                 snapshot_x[data_class_name][key] = before_latent_activations.cpu().numpy()
                 train_x[data_class_name][key] = latent_activations.cpu().numpy()
                 train_y[data_class_name][key] = label_dict[key]
+                store_y[data_class_name][key] = label_dict[key]
             torch.save(
                 {"snapshot_x": snapshot_x[data_class_name], 
                 "store_y": store_y[data_class_name], 

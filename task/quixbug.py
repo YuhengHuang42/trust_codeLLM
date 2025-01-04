@@ -147,7 +147,7 @@ class QuixbugDatasetPy(CodeDataset):
     def get_fix_code(self, idx):
         return self.clean_dataset[self.index[idx]]['fix']
     
-    def check_result(self, generated_code, idx):
+    def check_result(self, generated_code, idx: int, completion_id=1, output_error_case=False, input_full_code=False):
         file_name = self.index[idx]
         tmp_path = os.path.join(self.local_cache_path, file_name)
         subprocess.run('rm -rf ' + str(tmp_path), shell=True)

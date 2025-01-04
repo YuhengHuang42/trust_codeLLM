@@ -182,7 +182,7 @@ def load_opensource_model(model_name,
             load_in_8bit=True,
         )
     elif quantization == "16bit":
-        args["torch_dtype"] = torch.float16 #torch.bfloat16rm
+        args["torch_dtype"] = torch.bfloat16 #torch.bfloat16
         quantization_config = None
     else:
         quantization_config = None
@@ -259,7 +259,7 @@ def get_line_to_char_index_mapping(text):
     return index_mapping
 
 
-def get_important_token_pos(important_line_info, data, tokenizer, language="java"):
+def get_important_token_pos(important_line_info, data, tokenizer):
     """
     Get the position idx of the important token given the important_line_info.
     ---
@@ -289,7 +289,7 @@ def get_important_token_pos(important_line_info, data, tokenizer, language="java
             #end_line_number = item[1]
             cleaned_line_number = list()
             for inner_line_idx in item:
-                if is_line_only_punctuators_pygments(split_response[inner_line_idx], language):
+                if is_line_only_punctuators_pygments(split_response[inner_line_idx]):
                     continue
                 else:
                     cleaned_line_number.append(inner_line_idx)
@@ -398,7 +398,7 @@ def extract_code_block(text, select_idx=None):
     code_start_shift = 0
     text_length = len(text)
     if len(re.findall("```", text)) == 1:
-        if not text.strip().startswith("```"):
+        if not text.startswith("```"):
             text = "```\n" + text
             code_start_shift = 4
         elif not text.strip().endswith("```"):
@@ -483,12 +483,9 @@ def normalize_code(code, language):
     Return:
         string. Code string without comments.
     """
-    # Capture and remove leading newlines
-    leading_newlines = re.match(r'^\n*', code).group(0)
-    code_without_leading_newlines = code[len(leading_newlines):]
     
     lexer = get_lexer_by_name(language)
-    tokens = lexer.get_tokens(code_without_leading_newlines)
+    tokens = lexer.get_tokens(code)
     # When the whole line is a comment
     # This filter will leave one single \n
     filtered_code = []
@@ -499,7 +496,6 @@ def normalize_code(code, language):
             for i in range(len(token_value.splitlines())-1):
                 filtered_code.append("\n")
     #filtered_code = ''.join(token_value for token_type, token_value in tokens if token_type not in Token.Comment)
-    filtered_code = leading_newlines + "".join(filtered_code)
     filtered_code = "".join(filtered_code)
     filtered_code = filtered_code.splitlines(keepends=True)
     result = list()

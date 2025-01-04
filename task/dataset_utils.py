@@ -155,7 +155,10 @@ def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1
     # The second-last one is the text description
     if without_filter is False:
         code_block, code_block_info = utils.extract_code_block(raw_buggy_code, None)
-        buggy_code_list = code_block[:-2] # Skip the Indicator and runnable code.
+        if len(code_block) > 2:
+            buggy_code_list = code_block[:-2] # Skip the Indicator and runnable code.
+        else:
+            buggy_code_list = code_block
     else:
         buggy_code_list = [raw_buggy_code]
         
@@ -170,7 +173,7 @@ def find_buggy_positions(original_code: str, raw_buggy_code: str, logging_idx=-1
         if len(positions) == 0:
             logger.error(f"No matching position find for {logging_idx}")
             logger.error(f"buggy_code: {buggy_code}")
-            logger.error(f"Original code: {original_code}")
+            #logger.error(f"Original code: {original_code}")
         result += positions
     return result
 
@@ -189,10 +192,14 @@ def get_candidate_tokens(data, key, tokenizer, lang, code_blocks_info=None):
     Output:
         candidate_tokens: List[List]: List of token idx. Each list corresponds to a line in the code block.
     """
+    code_blocks = None 
     if code_blocks_info is None:
         code_blocks, code_blocks_info = utils.extract_code_block(data[key]['str_output'])
-    if len(code_blocks_info) == 0:
+    if code_blocks_info is None or len(code_blocks_info) == 0:
         return None
+    if code_blocks is not None and len(code_blocks) == 1:
+        if code_blocks[0].strip() == "":
+            return None
     target_code_block_info = code_blocks_info[-1] # The last code enclosed by ``` ```.
     #tokenized_info = tokenizer(data[key]['str_output'], loggru=True, add_special_tokens=False)
     #tokenized_info_start_idx = utils.remove_redundant_tuples(tokenized_info["offset_mapping"])

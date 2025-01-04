@@ -786,6 +786,7 @@ class RankNet(nn.Module):
             # Find the maximum length
             max_length = max(len(item) for item in rank_y)
 
+            x = [convert_to_torch_tensor(i) for i in x]
             # Pad sequences with zeros and convert to tensor
             padded_rank_y = torch.tensor(
                 list(zip_longest(*rank_y, fillvalue=fillvalue)), dtype=torch.float32

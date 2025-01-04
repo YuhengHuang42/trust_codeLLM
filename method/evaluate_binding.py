@@ -30,8 +30,8 @@ from method.semantic_binding import LAYER_DICT
 STORE = 0
 LOAD = 1
 
-#app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
-app = typer.Typer()
+app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=False)
+#app = typer.Typer()
 
 def compute_hit_line(important_tokens: list, selected_tokens: list):
     """
@@ -245,7 +245,7 @@ def main(
     #for key in data:
     #    diff_results = utils.get_changes_with_line_numbers(dataset[int(key)]['fix'], data[key]['str_output'], "java")
     #    error_line_info[key] =  [list(set([i[0] for i in diff_results[0]] + [i[0] for i in diff_results[1]]))]
-    target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer)
+    target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer, language=language)
     evaluate_key_mapping = {}
     only_wrong_key_list = []
     for key in data:
@@ -254,7 +254,7 @@ def main(
             continue
         if utils.determine_correctness(data[key]["code_correctness"]) == 0: # correct
             continue
-        if len(error_line_info[key][0]) == 0:
+        if len(error_line_info[key]) == 0 or len(error_line_info[key][0]) == 0:
             logger.info("No error info for key: {}".format(key))
             continue
         only_wrong_key_list.append(key)
@@ -383,6 +383,9 @@ def main(
         recall_score = 0
         counter = 0
         for key in only_wrong_key_list:
+            if len(important_token_info[key]) == 0:
+                print(key)
+                raise Exception
             if extract_code:
                 code_blocks_info = None
             else:

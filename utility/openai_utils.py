@@ -163,8 +163,8 @@ def get_editting_error_prompt(
     openai_user_input = "Now here is the problem\n\n" +\
     "Instruction: {}\n\n".format(instruction) +\
     "Original Code: \n```{}\n```\n\n".format(original_code) +\
-    "The wrong edited code: \n```{}\n```\n\n".format(generated_code) +\
     "Reference correct code: \n```{}\n```\n\n".format(gt_code) +\
+    "The wrong edited code: \n```{}\n```\n\n".format(generated_code) +\
     "\n\nYour answer:\n"
     message = {"system": openai_system_input, "user": openai_user_input}
     return message
