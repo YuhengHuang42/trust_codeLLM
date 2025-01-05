@@ -37,6 +37,9 @@ app = typer.Typer(pretty_exceptions_show_locals=False, pretty_exceptions_short=F
 LAYER_DICT = {
     "Phind/Phind-CodeLlama-34B-v2": {
         -1: "model.layers.47.self_attn"
+    },
+    "uukuguy/speechless-starcoder2-15b": {
+        -1: "model.layers.39.self_attn"  
     }
 }
 from utility.utils import HARD_TOKEN_LIMIT
@@ -318,6 +321,8 @@ def main(
     #assert data_source in ["shelve", "tracer"]
     assert collect_type in ["attention", "hidden"]
     assert mode in ["lbl", "sae", "internal_only", "ae"]
+    if agg is not None:
+        assert agg in ["mean", "last", "lbl_all"]
     #assert dataset in ["humaneval", "safim"]
     FALLBACK_ARGS["model_name"] = model_name
     FALLBACK_ARGS["parallel"] = parallel
@@ -348,8 +353,11 @@ def main(
     ## Load model
     quantization = config_dict["llm_config"]["quantization"]
     #generate_config = config_dict["llm_config"]["generate_config"]
-    
-    training_data_path = os.path.join(training_data_folder, training_data_path_name.format(layer))
+    if agg is not None and agg == "lbl_all":
+        postfix = training_data_path_name.format(layer) + "_lbl_all"
+    else:
+        postfix = training_data_path_name.format(layer)
+    training_data_path = os.path.join(training_data_folder, postfix)
     os.makedirs(training_data_path, exist_ok=True)
     #if os.path.exists(training_data_path):
     #    #logger.info(f"Load {collect_type} training data from {training_data_path}")
@@ -392,8 +400,9 @@ def main(
             #            cur_first_token_dict.pop(key)
             #            cur_candidate_token_dict.pop(key)
             if agg is not None:
-                for key in cur_train_x:
-                    cur_train_x[key] = aggregate_feature(cur_train_x[key], agg) # (L, hidden_dim) --> (hidden_dim)
+                if agg != "lbl_all":
+                    for key in cur_train_x:
+                        cur_train_x[key] = aggregate_feature(cur_train_x[key], agg) # (L, hidden_dim) --> (hidden_dim)
                 for key in cur_train_y:
                     cur_train_y[key] = [max(cur_train_y[key])] # Assume 1 means incorrect code.
             if pass_mode == "dict":
@@ -474,16 +483,21 @@ def main(
                 input_token_length = data[key]["input_length"]
                 candidate_token_dict[data_class_name][key] = candidate_tokens
                 if mode == "lbl":
+                    if agg == "lbl_all":
+                        candidate_tokens = None
                     al_result = collect_attention_map(snap_shot_single, layer, input_token_length, candidate_tokens)
-                    al_result = torch.stack(al_result)
+                    if agg != "lbl_all":
+                        al_result = torch.stack(al_result)
                     snapshot_x[data_class_name][key] = al_result.tolist()
                     if pass_mode == "dict":
-                        if agg is None:
+                        if agg is None or agg == "lbl_all":
                             train_x[data_class_name][key] = al_result
                         else:
                             train_x[data_class_name][key] = aggregate_feature(al_result, agg)
                     else:
-                        if agg is None:
+                        if agg == "lbl_all":
+                            train_x.append(al_result)
+                        elif agg is None:
                             train_x += [i for i in al_result]
                         else:
                             train_x.append(aggregate_feature(al_result, agg))
@@ -555,7 +569,7 @@ def main(
         train_info["context"] = first_token_dict
     if mode == "lbl":
         clf = LBLRegression()
-        clf.fit(train_info, model_type, fit_model_param, layer)
+        clf.fit(train_info, model_type, fit_model_param, layer, agg=agg)
     elif (mode == "sae" or mode =="ae") or mode == "internal_only":
         clf = EncoderClassifier()
         clf.fit(train_info, model_type, fit_model_param, encoder, vector_norm=vector_norm, external_proj=external_proj, agg=agg)

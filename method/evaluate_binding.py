@@ -13,6 +13,7 @@ import json
 import gc
 import time
 import copy
+import random
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import sys
@@ -194,6 +195,7 @@ def main(
     detection_model_path: Annotated[Path, typer.Option()] = None,
     before_cache_save_folder: Annotated[Path, typer.Option()] = None,
     mode: Annotated[str, typer.Option()] = None,
+    repeat_time: Annotated[int, typer.Option()] = 50,
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
@@ -218,10 +220,11 @@ def main(
     assert collect_type in ["attention", "hidden"]
     if collect_type == "attention":
         layer = LAYER_DICT[model_name][layer]
-    assert mode in ["lbl", "sae", "uncertainty", "internal_only"]
+    assert mode in ["lbl", "sae", "uncertainty", "internal_only", "random"]
     if mode == "internal_only":
         mode = "sae" # SAE and Internal_only share the same interface, the difference is that the latter does not have encoder.
-    
+    if mode == "random":
+        logger.info(f"Enable random mode, repeat time: {repeat_time}")
     cache_dir = None
     if "HF_HOME" in config_dict["system_setting"]:
         os.environ["HF_HOME"] = config_dict["system_setting"]["HF_HOME"]
@@ -245,6 +248,10 @@ def main(
     #for key in data:
     #    diff_results = utils.get_changes_with_line_numbers(dataset[int(key)]['fix'], data[key]['str_output'], "java")
     #    error_line_info[key] =  [list(set([i[0] for i in diff_results[0]] + [i[0] for i in diff_results[1]]))]
+    if mode == "lbl":
+        detection_model = detect_model.LBLRegression.load(detection_model_path)
+    elif mode == "sae":
+        detection_model = detect_model.EncoderClassifier.load(detection_model_path)
     target_buggy_positions, important_token_info = utils.get_important_token_pos(error_line_info, data, tokenizer, language=language)
     evaluate_key_mapping = {}
     only_wrong_key_list = []
@@ -259,11 +266,15 @@ def main(
             continue
         only_wrong_key_list.append(key)
 
-    if mode != "uncertainty":
+    if mode != "uncertainty" and mode != "random":
         if before_cache_save_folder is not None:
             dataset_identifier = os.path.basename(data_path).split(".")[0]
             model_identifier = model_name.split("/")[-1]
-            before_cache_save_path = os.path.join(before_cache_save_folder, f"{model_identifier}_{mode}_{collect_type}_extract_code{extract_code}_{dataset_identifier}_before_cache.pt")
+            before_cache_save_path = os.path.join(before_cache_save_folder, f"{model_identifier}_{mode}_{collect_type}_extract_code{extract_code}_{dataset_identifier}_before_cache")
+            if detection_model.agg == "lbl_all":
+                before_cache_save_path += "_lbl_all.pt"
+            else:
+                before_cache_save_path += ".pt"
             if os.path.exists(before_cache_save_path):
                 before_info = torch.load(before_cache_save_path)
                 before_dict = before_info["before_dict"]
@@ -297,10 +308,6 @@ def main(
         #    dataset = defects4j.Defects4jDataset(data_path, loc_folder, defects4j_path, java_home=java_path)
 
         # ==== Begin collecting attention scores ====
-        if mode == "lbl":
-            detection_model = detect_model.LBLRegression.load(detection_model_path)
-        elif mode == "sae":
-            detection_model = detect_model.EncoderClassifier.load(detection_model_path)
             
         #lbl_model.load(lbl_model_path)
         
@@ -394,33 +401,64 @@ def main(
             if candidate_tokens is None:
                 result[key] = [None, None]
                 continue
-            recorded_result = result[key]
-            rank_per_line = recorded_result[1][:topk_iter]
-            selected_token = set()
-            for line in rank_per_line:
-                selected_token = selected_token.union(set(candidate_tokens[line]))
+            if mode == "random":
+                cur_hit_score_list = []
+                cur_hit_line_score_list = []
+                cur_recall_score_list = []
+                selected_token = []
+                result = None
+                oom_keys = None
+                for i in range(repeat_time):
+                    random.shuffle(candidate_tokens)
+                    one_selected_token = candidate_tokens[:topk_iter]
+                    one_selected_token = [t for i in one_selected_token for t in i]
+                    one_selected_token = set(one_selected_token)
+                    one_hit_score = compute_hit(important_token_info[key], one_selected_token)
+                    one_hit_line_score = compute_hit_line(important_token_info[key], one_selected_token)
+                    one_recall_score = compute_recall(important_token_info[key], one_selected_token)
+                    cur_hit_score_list.append(one_hit_score)
+                    cur_hit_line_score_list.append(one_hit_line_score)
+                    cur_recall_score_list.append(one_recall_score)
+                    selected_token.append(list(one_selected_token))
+                    
+                hit_detail["top{}".format(topk_iter)][key] = {"hit": cur_hit_score_list, 
+                                                            "hit_line": cur_hit_line_score_list, 
+                                                            "recall": cur_recall_score_list,
+                                                            "gt": important_token_info[key],
+                                                            "selected_token": selected_token
+                                                            }
+                hit_score += np.mean(cur_hit_score_list)
+                hit_line_score += np.mean(cur_hit_line_score_list)
+                recall_score += np.mean(cur_recall_score_list)
+                
+            else:
+                recorded_result = result[key]
+                rank_per_line = recorded_result[1][:topk_iter]
+                selected_token = set()
+                for line in rank_per_line:
+                    selected_token = selected_token.union(set(candidate_tokens[line]))
+                
+                cur_hit_score = compute_hit(important_token_info[key], selected_token)
+                cur_hit_line_score = compute_hit_line(important_token_info[key], selected_token)
+                cur_recall_score = compute_recall(important_token_info[key], selected_token)
             
-            cur_hit_score = compute_hit(important_token_info[key], selected_token)
-            cur_hit_line_score = compute_hit_line(important_token_info[key], selected_token)
-            cur_recall_score = compute_recall(important_token_info[key], selected_token)
-            
-            hit_detail["top{}".format(topk_iter)][key] = {"hit": cur_hit_score, 
-                                                          "hit_line": cur_hit_line_score, 
-                                                          "recall": cur_recall_score,
-                                                          "gt": important_token_info[key],
-                                                          "selected_token": list(selected_token)
-                                                          }
-            
-            hit_score += cur_hit_score
-            hit_line_score += cur_hit_line_score
-            recall_score += cur_recall_score
+                hit_detail["top{}".format(topk_iter)][key] = {"hit": cur_hit_score, 
+                                                            "hit_line": cur_hit_line_score, 
+                                                            "recall": cur_recall_score,
+                                                            "gt": important_token_info[key],
+                                                            "selected_token": list(selected_token)
+                                                            }
+                
+                hit_score += cur_hit_score
+                hit_line_score += cur_hit_line_score
+                recall_score += cur_recall_score
             
             counter += 1
-        topk_recorder['hit_rate']["top{}".format(topk_iter)] = hit_score / counter
-        topk_recorder['recall']["top{}".format(topk_iter)] = recall_score / counter
-        topk_recorder['hit_line_rate']["top{}".format(topk_iter)] = hit_line_score / counter
+            topk_recorder['hit_rate']["top{}".format(topk_iter)] = hit_score / counter
+            topk_recorder['recall']["top{}".format(topk_iter)] = recall_score / counter
+            topk_recorder['hit_line_rate']["top{}".format(topk_iter)] = hit_line_score / counter
     
-    if mode != "uncertainty":
+    if mode != "uncertainty" and mode != "random":
         for key in result:
             if isinstance(result[key][0], torch.Tensor) or isinstance(result[key][0], np.ndarray):
                 result[key][0] = result[key][0].tolist()

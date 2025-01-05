@@ -38,8 +38,16 @@ def aggregate_feature(feature, agg):
             return np.mean(feature, axis=1)
         elif agg == "last":
             return feature[:, -1]
-    
-def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, numeric_stability=1e-7):
+    elif len(feature.shape) == 1:
+        if agg == "mean":
+            return np.mean(feature)
+        elif agg == "last":
+            return feature[-1]
+        elif agg == "max":
+            return np.max(feature)
+
+
+def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg=None, numeric_stability=1e-7):
     """
     Collect features as hallucination detection mentioned in the paper.
     ---
@@ -51,18 +59,25 @@ def collect_attention_map(attn_snapshot, layer, input_token_length, output_seg, 
         output_seg: List[List]: List of segment tokens. It should be str_output version
     Return:
         #vt: torch.tensor. vt in the paper with the shape [multi_head_num]
-        al_result: List[Tensor]. The attention score of each segment. Each tensor has the shape [multi_head_num]
+        al_result: List[Tensor] / [Tensor]. The attention score of each segment. Each tensor has the shape [multi_head_num]
+            return tensor when output_set is None
     """
     
     al_context = attn_snapshot[layer][0][:, -1, :input_token_length]
     al_context = torch.mean(al_context, dim=-1)
     al_result = list()
-    for seg in output_seg:
-        real_seg = [i + input_token_length for i in seg]
-        attn_seg = attn_snapshot[layer][0][:, -1, real_seg]
+    if output_seg is None:
+        attn_seg = attn_snapshot[layer][0][:, -1, :]
         al_attn_score = torch.mean(attn_seg, dim=-1)
         al_attn_score = al_context / (al_context + al_attn_score + numeric_stability)
-        al_result.append(al_attn_score)
+        return al_attn_score
+    else:
+        for seg in output_seg:
+            real_seg = [i + input_token_length for i in seg]
+            attn_seg = attn_snapshot[layer][0][:, -1, real_seg]
+            al_attn_score = torch.mean(attn_seg, dim=-1)
+            al_attn_score = al_context / (al_context + al_attn_score + numeric_stability)
+            al_result.append(al_attn_score)
     #al_new = attn_snapshot[layer][0][:, -1, input_token_length:]
     #al_new = torch.mean(al_new, dim=-1)
     
@@ -376,11 +391,14 @@ class EncoderClassifier(RiskPredictor):
             self.external_dim_red_flag = True
             train_x = self.dim_red.forward(train_x, norm=not already_norm).numpy()
             #train_x = self.dim_red.fit_transform(train_x, norm=not already_norm)
-                
+
         if "balanced" in self.fit_model_param:
             balanced = self.fit_model_param.pop("balanced")
             if balanced:
-                smote = SMOTE()
+                if isinstance(balanced, dict):
+                    smote = SMOTE(**balanced)
+                else:
+                    smote = SMOTE()
                 train_x, train_y = smote.fit_resample(train_x, train_y)
         if "sorting_code" in self.fit_model_param:
             self.sorting_code = self.fit_model_param.pop("sorting_code")
@@ -590,12 +608,21 @@ class LBLRegression():
         self.agg = None
         self.hidden_first = None
         
-    def fit(self, train_info, model_type, fit_model_param, attn_layer):
+    def fit(self, train_info, model_type, fit_model_param, attn_layer, agg):
         self.fit_model_param = fit_model_param
         self.attn_layer = attn_layer
         self.model_type = model_type
+        self.agg = agg
         train_x = train_info["train_x"]
         train_y = train_info["train_y"]
+        if "balanced" in self.fit_model_param:
+            balanced = self.fit_model_param.pop("balanced")
+            if balanced:
+                if isinstance(balanced, dict):
+                    smote = SMOTE(**balanced)
+                else:
+                    smote = SMOTE()
+                train_x, train_y = smote.fit_resample(train_x, train_y)
         if self.model_type.lower() == "logistic":
             self.clf = LogisticRegression(**fit_model_param).fit(train_x, train_y)
         elif self.model_type.lower() == "svm":
@@ -625,12 +652,17 @@ class LBLRegression():
     
     def predict(self, attn_snapshot=None, input_token_length=None, candidate_tokens=None, x=None, first_token=None):
         assert attn_snapshot is not None or x is not None, "Either attn_snapshot or before_enc should be provided."
-        if x is None:
+        if x is None and self.agg != "lbl_all":
             al_result = collect_attention_map(attn_snapshot, self.attn_layer, input_token_length, candidate_tokens)
             x = np.stack(al_result).astype(np.float32)
+        elif x is None:
+            al_result = collect_attention_map(attn_snapshot, self.attn_layer, input_token_length, None)
+            x = al_result.numpy().astype(np.float32)
+            x = x.reshape(1, -1)
         self.cache = x
-        if self.agg is not None:
+        if self.agg is not None and self.agg != "lbl_all":
             x = aggregate_feature(x, self.agg)
+            x = x.reshape(1, -1)
         y = self.clf.predict_proba(x)
 
         pred_result = y[:, 1]
