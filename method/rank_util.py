@@ -584,6 +584,7 @@ class RankNet(nn.Module):
             output = [input_1, first_token]
         else:
             output = input_1
+        output = output.to(next(self.parameters()).device)
         return self.blocks[:-1](output)
         
     def forward_both(self, input_1, first_token=None, length=None):
