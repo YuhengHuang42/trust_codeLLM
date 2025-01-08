@@ -40,6 +40,9 @@ LAYER_DICT = {
     },
     "uukuguy/speechless-starcoder2-15b": {
         -1: "model.layers.39.self_attn"  
+    },
+    "Qwen/Qwen2.5-Coder-32B": {
+        -1: "model.layers.63.self_attn"
     }
 }
 from utility.utils import HARD_TOKEN_LIMIT
