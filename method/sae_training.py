@@ -415,6 +415,7 @@ def main(
     all_loss_list = []
     for epoch in range(epoch_num):
         if contrastive_loss_fn is None:
+            '''
             sae, loss_list = training_one_epoch(sae, 
                                                 data_loader_list, 
                                                 optimizer, 
@@ -426,6 +427,20 @@ def main(
                                                 wandb_handle=wandbrun,
                                                 clip_grad=clip_grad
                                             )
+            '''
+            sae, loss_list = training_one_epoch_contrastive(sae,
+                                                            data_loader_list,
+                                                            optimizer,
+                                                            recon_loss_fn=loss_fn,
+                                                            contrastive_loss_fn=c_loss_fn,
+                                                            epoch=epoch,
+                                                            path=result_output_path,
+                                                            print_freq_prop=print_freq_prop,
+                                                            scheduler=scheduler,
+                                                            wandb_handle=wandbrun,
+                                                            clip_grad=clip_grad,
+                                                            next_token_pred=next_token_pred
+                                                            )
         else:
             if cold_start_epoch > epoch:
                 c_loss_fn = None
