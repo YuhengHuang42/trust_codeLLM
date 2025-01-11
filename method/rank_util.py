@@ -54,6 +54,14 @@ def convert_to_torch_tensor(array):
         return array
     else:
         raise TypeError("Input must be a NumPy array or a PyTorch tensor.")
+
+def convert_to_numpy_tensor(array):
+    if isinstance(array, torch.Tensor):
+        return array.cpu().numpy()
+    elif isinstance(array, np.ndarray):
+        return array
+    else:
+        return np.array(array)
     
 class DictDataset(Dataset):
     def __init__(self, dict_x, dict_y, dict_z=None, dict_m=None):

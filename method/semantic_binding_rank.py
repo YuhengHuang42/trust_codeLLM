@@ -65,7 +65,7 @@ def main(
     layer = config_dict["task_config"]["layer"]
     training_data_path_name = config_dict["task_config"]["training_data_path_name"]
     if encoder_path is None:
-        encoder_path = config_dict['task_config']["encoder_path"]
+        encoder_path = config_dict['task_config'].get("encoder_path", None)
     collect_type = config_dict["task_config"]['collect_type']
     dataset_list = config_dict["task_config"].get("dataset_list", ["humaneval"])
     data_source = config_dict["task_config"].get("data_source", ["shelve"])
@@ -73,27 +73,30 @@ def main(
     important_label_path_list = config_dict["task_config"].get("important_label_path_list", [None])
     data_path_list = config_dict["task_config"]['data_path_list']
     
-    net_layer = config_dict["task_config"]['fit_model_param'].get("net_layer", 4)
-    input_dim = config_dict["task_config"]['fit_model_param'].get("input_dim", 128)
-    hidden_dim = config_dict["task_config"]['fit_model_param'].get("hidden_dim", 32)
-    if agg is None:
-        agg = config_dict["task_config"]['fit_model_param'].get("agg", None)
-    if agg is None:
-        enable_classifier = False
+    if "fit_model_param" in config_dict["task_config"]:
+        net_layer = config_dict["task_config"]['fit_model_param'].get("net_layer", 4)
+        input_dim = config_dict["task_config"]['fit_model_param'].get("input_dim", 128)
+        hidden_dim = config_dict["task_config"]['fit_model_param'].get("hidden_dim", 32)
+        if agg is None:
+            agg = config_dict["task_config"]['fit_model_param'].get("agg", None)
+        if agg is None:
+            enable_classifier = False
+        else:
+            enable_classifier = True
+            logger.info(f"Enable Classifier Mode with {agg} aggregation")
+        lr = config_dict["task_config"]['fit_model_param'].get("lr", 1e-4)
+        lr = float(lr)
+        batch_size = config_dict["task_config"]['fit_model_param'].get("batch_size", 2)
+        batch_size = int(batch_size)
+        num_epochs = config_dict["task_config"]['fit_model_param'].get("num_epochs", 20)
+        num_epochs = int(num_epochs)
+        weight_decay = config_dict["task_config"]['fit_model_param'].get("weight_decay", 1e-5)
+        weight_decay = float(weight_decay)
+        act = config_dict["task_config"]['fit_model_param'].get("act", "ReLU")
+        beta1 = config_dict["task_config"]['fit_model_param'].get("beta1", 0.9)
+        beta1 = float(beta1)
     else:
-        enable_classifier = True
-        logger.info(f"Enable Classifier Mode with {agg} aggregation")
-    lr = config_dict["task_config"]['fit_model_param'].get("lr", 1e-4)
-    lr = float(lr)
-    batch_size = config_dict["task_config"]['fit_model_param'].get("batch_size", 2)
-    batch_size = int(batch_size)
-    num_epochs = config_dict["task_config"]['fit_model_param'].get("num_epochs", 20)
-    num_epochs = int(num_epochs)
-    weight_decay = config_dict["task_config"]['fit_model_param'].get("weight_decay", 1e-5)
-    weight_decay = float(weight_decay)
-    act = config_dict["task_config"]['fit_model_param'].get("act", "ReLU")
-    beta1 = config_dict["task_config"]['fit_model_param'].get("beta1", 0.9)
-    beta1 = float(beta1)
+        input_dim = config_dict["task_config"].get("input_dim", 128)
     
     logger.info(f"Training Rank model")
     #assert data_source in ["shelve", "tracer"]
@@ -103,9 +106,17 @@ def main(
     FALLBACK_ARGS["parallel"] = parallel
     FALLBACK_ARGS["cache_dir"] = cache_dir
     
-    assert encoder_path is not None
-    encoder_param = torch.load(encoder_path)
-    encoder = sae_model.Autoencoder.from_state_dict(encoder_param["model_state_dict"])
+    if encoder_path is None:
+        logger.warning("No Encoder provided, fallback to PCA.")
+        pca_encoder = detect_model.PCAEncoder()
+        encoder = None
+        collect_mode = "internal_only"
+        encoder_type = pca_encoder.__class__.__name__
+    else:
+        encoder_param = torch.load(encoder_path)
+        encoder = sae_model.Autoencoder.from_state_dict(encoder_param["model_state_dict"])
+        collect_mode = "sae"
+        encoder_type = "Autoencoder"
 
     tokenizer = utils.load_tokenizer(model_name)
     data_line_token_pair = sb.load_gt(data_source, dataset_list, data_path_list, important_label_path_list, tokenizer)
@@ -129,7 +140,7 @@ def main(
         if os.path.exists(cur_data_path):
             logger.info(f"Load {collect_type} training data from {cur_data_path}")
             cur_train_x, cur_train_y, cur_first_token_dict, cur_first_token_in_dict, cur_candidate_token_dict = sb.load_from_existing_data(cur_data_path, 
-                                                                                                                                        "sae",
+                                                                                                                                        collect_mode,
                                                                                                                                         encoder
                                                                                                                                         )
             train_x[data_class_name] = cur_train_x
@@ -173,10 +184,14 @@ def main(
                 _, before_latent_activations = collect_hidden_states(snap_shot_single, input_token_length, candidate_tokens, None)
                 first_token_dict[data_class_name][key] = snap_shot_single[input_token_length]
                 first_token_in_dict[data_class_name][key] = (candidate_tokens[0] == 0)
-                with torch.inference_mode():
-                    latent_activations, info = encoder.encode(before_latent_activations.to(encoder.device))
+                if encoder is not None:
+                    with torch.inference_mode():
+                        latent_activations, info = encoder.encode(before_latent_activations.to(encoder.device))
+                        latent_activations = latent_activations.cpu().numpy()
+                else:
+                    latent_activations = before_latent_activations.cpu().numpy()
                 snapshot_x[data_class_name][key] = before_latent_activations.cpu().numpy()
-                train_x[data_class_name][key] = latent_activations.cpu().numpy()
+                train_x[data_class_name][key] = latent_activations
                 train_y[data_class_name][key] = label_dict[key]
                 store_y[data_class_name][key] = label_dict[key]
             torch.save(
@@ -184,13 +199,18 @@ def main(
                 "store_y": store_y[data_class_name], 
                 "first_token": [first_token_dict[data_class_name], first_token_in_dict[data_class_name]],
                 "candidate_token_dict": candidate_token_dict[data_class_name],
-                }, cur_data_path)
+                }, cur_data_path
+                )
     
 
     train_x = flat_data_dict(train_x)
     train_y = flat_data_dict(train_y)
     first_token_dict = flat_data_dict(first_token_dict)
     candidate_token_dict = flat_data_dict(candidate_token_dict)
+
+    if encoder is None:
+         # PCA mode
+        pca_encoder.fit(train_x, input_dim)
 
     
     if agg is None:
@@ -206,6 +226,7 @@ def main(
     
     logger.info(f"Train X Length: {len(train_x)}")
     
+    
 
     clf = detect_model.RankNet(
         input_dim,
@@ -213,7 +234,13 @@ def main(
         hidden_dim,
         enable_classifier = enable_classifier,
         act = act
-    )
+    )   
+    
+    if encoder is None:
+        for key in train_x:
+            train_x[key], _ = pca_encoder.encode(train_x[key])
+        encoder = pca_encoder
+        clf.encoder = encoder
     
     learning_param = {
         "lr": lr,
@@ -249,7 +276,7 @@ def main(
         "model_type": "ranker",
         "dim_red": None,
         "device": "cpu",
-        "encoder_type": "Autoencoder",
+        "encoder_type": encoder_type,
         "encoder": encoder.state_dict(),
         "model": clf.pack()
         

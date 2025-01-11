@@ -194,7 +194,8 @@ class HumanEvalPack:
                 "contrastive_pair": contrastive_pair,
                 "code_split_pos": error_split_list,
                 "line_label": line_label
-            }
+            },
+            "language": dp['task_id'].split("/")[0]
         }
         return item
 
@@ -214,9 +215,8 @@ class RepairData:
         self.original_label = original_label
         self.mutated_label = mutated_label
         self.data_type = None
-
         if "commitpack" in dataset_name:
-            self.data_type == "commit"
+            self.data_type = "commit"
             ds = load_dataset(dataset_name, "best_rated")["train"]
             self.data = []
             feature_key_list = set(feature_key_list)
@@ -232,7 +232,7 @@ class RepairData:
         else:
             # DebugBench
             ds = load_dataset(dataset_name, "test")["test"]
-            self.data_type == "debug"
+            self.data_type = "debug"
             for item in ds:
                 if tokenizer is not None:
                     token_list = tokenizer(self.wrap_input(item, split_token))["input_ids"]
@@ -303,7 +303,8 @@ class RepairData:
                 "contrastive_pair": contrastive_pair,
                 "code_split_pos": error_split_list,
                 "line_label": line_label
-            }
+            },
+            "language": dp["language"]
         }
         return item
 
@@ -1035,6 +1036,7 @@ def inference_and_collect(
     tokenizer,
     store,
     run_original: bool,
+    run_mutated: bool=True,
 ):
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=lambda x:x)
     for idx, item in enumerate(tqdm.tqdm(data_loader)):
@@ -1064,11 +1066,15 @@ def inference_and_collect(
                              "start_hidden": start_hidden, 
                              "last_hidden": last_hidden, 
                              "start_in": start_token_idx in original_split_tok_pos,
-                             "last_in": end_token_idx in original_split_tok_pos,},
+                             "last_in": end_token_idx in original_split_tok_pos,
+                             },
                 "original_split_tok_pos": original_split_tok_pos,   
             }
         else:
             store_info = store[idx]
+        if run_mutated is False:
+            store.append(store_info)
+            continue
         if "mutated_code" not in store_info:
             store_info["mutated_code"] = {}
         
@@ -1123,6 +1129,7 @@ def main(
     config_file: Annotated[Path, typer.Option()],
     result_output_path: Annotated[Path, typer.Option()],
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
+    dry_run: Annotated[bool, typer.Option("--dry-run/--no-dry-run")] = False,
     #aug_times: Annotated[int, typer.Option("--aug-times")] = 1
 ):
     start = time.time()
@@ -1165,18 +1172,26 @@ def main(
         logger.info(f"Using {dataset_name} as dataset")
         data = RepairData(dataset_name=dataset_name, feature_key_list=feature_key_list)
     else:
-        aug_times = len(mutation_prop)
-        if dataset_path_list is not None:
-            data = AugPretrainCodedata.load(dataset_path_list[0])
-            aug_times = len(dataset_path_list)
-        else:
-            data = AugPretrainCodedata(
-                float(mutation_prop[0]),
+        if dry_run:
+            data = PretrainCodedata(
                 dataset_name,
                 feature_key_list,
                 preprocess_all_in_memory=True,
                 split_token=split_token
             )
+        else:
+            aug_times = len(mutation_prop)
+            if dataset_path_list is not None:
+                data = AugPretrainCodedata.load(dataset_path_list[0])
+                aug_times = len(dataset_path_list)
+            else:
+                data = AugPretrainCodedata(
+                    float(mutation_prop[0]),
+                    dataset_name,
+                    feature_key_list,
+                    preprocess_all_in_memory=True,
+                    split_token=split_token
+                )
     #instance_real_num = data.compute_all_inference_num()
     #store = naive_store.NaiveTensorStore()
     store = naive_store.VariedKeyTensorStore()
@@ -1189,7 +1204,8 @@ def main(
         recorder,
         tokenizer,
         store,
-        True
+        True,
+        run_mutated = (not dry_run)
     )
     
     for i in range(1, aug_times):

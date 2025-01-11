@@ -1,5 +1,6 @@
 import numpy as np
 import sklearn
+import sklearn.decomposition
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
 import joblib
@@ -18,8 +19,8 @@ from abc import abstractmethod
 from itertools import zip_longest
 from torch.nn.utils.rnn import pad_sequence
 
-from method.sae_model import Autoencoder, NaiveAutoEncoder
-from method.rank_util import DictDataset, RankNet, ScaledDotProductAttention, convert_to_torch_tensor
+from sae_model import Autoencoder, NaiveAutoEncoder
+from rank_util import DictDataset, RankNet, ScaledDotProductAttention, convert_to_torch_tensor, convert_to_numpy_tensor
 # from sparse_autoencoder import LN
 
 PADDED_Y_VALUE = -1
@@ -347,7 +348,47 @@ def compute_grad_norm(model):
     total_grad_norm = total_grad_norm ** 0.5  # Take the square root to get the total L2 norm
     return total_grad_norm
     
+class PCAEncoder():
+    def __init__(self):
+        self.pca = None
+        self.input_dim = None
+        self.target_dim = None
+        
+    def encode(self, X):
+        X = convert_to_numpy_tensor(X)
+        if X.shape < 2:
+            X = X.reshape(1, -1)
+        return self.pca.transform(X)
 
+    def prepare_for_train(self, target_dim):
+        self.target_dim = target_dim
+        self.pca = sklearn.decomposition.IncrementalPCA(n_components=target_dim)
+        
+    def partial_fit(self, X):
+        self.input_dim = X.shape[1]
+        X = convert_to_numpy_tensor(X)
+        self.pca.partial_fit(X)
+    
+    def cpu(self):
+        return self
+    
+    def state_dict(self):
+        parameters = {
+            "input_dim": self.input_dim,
+            "target_dim": self.target_dim,
+            "pca": self.pca
+        }
+        return parameters
+    
+    @classmethod
+    def from_state_dict(cls, parameters):
+        model = cls()
+        model.pca = parameters["pca"]
+        model.input_dim = parameters["input_dim"]
+        model.target_dim = parameters["target_dim"]
+        return model
+    
+    
        
 class EncoderClassifier(RiskPredictor):
     def __init__(self):
@@ -420,9 +461,12 @@ class EncoderClassifier(RiskPredictor):
         
     def save(self, path):
         if self.encoder is not None:
-            encoder_device = self.encoder.device
-            encoder_state_dict = self.encoder.cpu().state_dict()
             encoder_type = self.encoder.__class__.__name__
+            if encoder_type != "PCAEncoder":
+                encoder_device = self.encoder.device
+                encoder_state_dict = self.encoder.cpu().state_dict()
+            else:
+                encoder_device = None
         else:
             encoder_device = None
             encoder_state_dict = None
@@ -463,9 +507,12 @@ class EncoderClassifier(RiskPredictor):
         if loaded_info["encoder"] is not None:
             if encoder_type == "Autoencoder":
                 encoder = Autoencoder.from_state_dict(loaded_info["encoder"])
+                model.encoder = encoder.to(device)
             elif encoder_type == "NaiveAutoEncoder":
                 encoder = NaiveAutoEncoder.from_state_dict(loaded_info["encoder"])
-            model.encoder = encoder.to(device)
+                model.encoder = encoder.to(device)
+            elif encoder_type == "PCAEncoder":
+                model.encoder = PCAEncoder.from_state_dict(loaded_info["encoder"])
         else:
             model.encoder = None
         model.vector_norm = loaded_info.get("vector_norm", False)
@@ -475,7 +522,7 @@ class EncoderClassifier(RiskPredictor):
         return model
 
     def to(self, device):
-        if self.encoder is not None:
+        if self.encoder is not None and self.encoder.__class__.__name__ != "PCAEncoder":
             self.encoder = self.encoder.to(device)
         return self
     

@@ -391,17 +391,6 @@ def main(
                                                                                                                                         mode,
                                                                                                                                         #data_line_token_pair[data_class_idx], 
                                                                                                                                         encoder)
-            #if agg is None:
-                # Line Level prediction mode
-                # Keeps the same with semantic_binding_rank.py
-            #    iter_list = list(cur_train_y.keys())
-            #    for key in iter_list:
-                    # The entire code is correct
-            #        if sum(cur_train_y[key]) == 0:
-            #            cur_train_x.pop(key)
-            #            cur_train_y.pop(key)
-            #            cur_first_token_dict.pop(key)
-            #            cur_candidate_token_dict.pop(key)
             if agg is not None:
                 if agg != "lbl_all":
                     for key in cur_train_x:
@@ -542,18 +531,6 @@ def main(
                 "candidate_token_dict": candidate_token_dict[data_class_name],
                 }, cur_data_path)
     
-    #torch.save({"snapshot_x": snapshot_x, 
-    #            "store_y": store_y[data_class_name], 
-    #            "first_token": [first_token_dict, first_token_in_dict],
-    #            "candidate_token_dict": candidate_token_dict,
-    #            }, training_data_path)
-    
-    #for key in data:
-    #    input_token_length = data[key]["input_length"]
-    #    attn_snapshot = attn_data[key]
-    #    al_result = collect_attention_map(attn_snapshot, attn_layer, input_token_length, candidate_tokens)
-    #    train_x += [i for i in al_result]
-    #    train_y += label_dict[key]
     train_info = dict()
     if pass_mode == "list":
         train_x = np.stack(train_x)
