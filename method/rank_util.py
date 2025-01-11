@@ -688,6 +688,7 @@ class RankNet(nn.Module):
             inst_counter = 0
             #for x, y, first_token in train_loader:
             for x, y in train_loader:
+                x = x.float()
                 if x.shape[1] == 1 and ((self.enable_classifier is False) or (self.enable_classifier is True and co_training is False)):
                     # The input has only one element. Skip this iteration.
                     continue

@@ -46,6 +46,7 @@ def main(
     parallel: Annotated[bool, typer.Option("--parallel/--no-parallel")] = True,
     encoder_path: Annotated[Path, typer.Option()] = None,
     agg: Annotated[str, typer.Option()] = None, # agg is used to indicate the aggregation method for hidden states used in classification mode.
+    pca_only: Annotated[bool, typer.Option("--pca_only/--no-pca_only")] = False,
 ):
     FALLBACK_ARGS = {
         "quantization": "4bit",
@@ -113,10 +114,16 @@ def main(
         collect_mode = "internal_only"
         encoder_type = pca_encoder.__class__.__name__
     else:
-        encoder_param = torch.load(encoder_path)
-        encoder = sae_model.Autoencoder.from_state_dict(encoder_param["model_state_dict"])
-        collect_mode = "sae"
-        encoder_type = "Autoencoder"
+        if pca_only:
+            encoder_param = torch.load(encoder_path)
+            encoder = detect_model.PCAEncoder.from_state_dict(encoder_param)
+            collect_mode = "sae"
+            encoder_type = encoder.__class__.__name__
+        else:
+            encoder_param = torch.load(encoder_path)
+            encoder = sae_model.Autoencoder.from_state_dict(encoder_param["model_state_dict"])
+            collect_mode = "sae"
+            encoder_type = encoder.__class__.__name__
 
     tokenizer = utils.load_tokenizer(model_name)
     data_line_token_pair = sb.load_gt(data_source, dataset_list, data_path_list, important_label_path_list, tokenizer)
@@ -210,7 +217,8 @@ def main(
 
     if encoder is None:
          # PCA mode
-        pca_encoder.fit(train_x, input_dim)
+        pca_encoder.prepare_for_train(input_dim)
+        pca_encoder.fit(train_x)
 
     
     if agg is None:

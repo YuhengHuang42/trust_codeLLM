@@ -356,10 +356,14 @@ class PCAEncoder():
         
     def encode(self, X):
         X = convert_to_numpy_tensor(X)
-        if X.shape < 2:
+        if len(X.shape) < 2:
             X = X.reshape(1, -1)
-        return self.pca.transform(X)
+        return torch.from_numpy(self.pca.transform(X).astype(np.float32)), None
 
+    @property
+    def device(self):
+        return "cpu"
+    
     def prepare_for_train(self, target_dim):
         self.target_dim = target_dim
         self.pca = sklearn.decomposition.IncrementalPCA(n_components=target_dim)
@@ -368,6 +372,18 @@ class PCAEncoder():
         self.input_dim = X.shape[1]
         X = convert_to_numpy_tensor(X)
         self.pca.partial_fit(X)
+    
+    def fit(self, X):
+        if isinstance(X, dict):
+            train_x = []
+            for key in X:
+                train_x.append(X[key])
+            train_x = np.concatenate(train_x)
+        else:
+            train_x = X
+        self.input_dim = train_x.shape[1]
+        train_x = convert_to_numpy_tensor(train_x)
+        self.pca.fit(train_x)
     
     def cpu(self):
         return self
