@@ -14,7 +14,7 @@ from extract.naive_store import NaiveTensorStore, VariedKeyTensorStore
 
 def training_encoder(encoder: PCAEncoder, data_loader_list):
     for data_loader in data_loader_list:
-        for idx, store_batch in tqdm.tqdm(enumerate(data_loader)):
+        for idx, store_batch in enumerate(tqdm.tqdm(data_loader)):
             original, mutated, original_index, mutated_index, additional_info = store_batch
             mutated_index = mutated_index.int()
             input_data = [original, mutated[mutated_index]]
