@@ -432,7 +432,7 @@ def main(
                                                             data_loader_list,
                                                             optimizer,
                                                             recon_loss_fn=loss_fn,
-                                                            contrastive_loss_fn=c_loss_fn,
+                                                            contrastive_loss_fn=None,
                                                             epoch=epoch,
                                                             path=result_output_path,
                                                             print_freq_prop=print_freq_prop,
@@ -477,10 +477,7 @@ def main(
              sae = sae.to(device)
         logger.info(f'Epoch: [{epoch}] Finished. Loss: {np.average(loss_list)}\t')
 
-    if contrastive_loss_fn is None:
-        eval_loss = evaluate(sae, data_loader_list, loss_fn)
-    else:
-        eval_loss = evaluate_contrastive(sae, data_loader_list, loss_fn, next_token_pred=next_token_pred)
+    eval_loss = evaluate_contrastive(sae, data_loader_list, loss_fn, next_token_pred=next_token_pred)
     if wandb_info is not None:
         wandb.log({
             "Eval loss": eval_loss,
