@@ -1,0 +1,43 @@
+llm_config:
+  model_name: "uukuguy/speechless-starcoder2-15b"
+  quantization: "16bit"
+  start_token: "<|endoftext|>" # Actually not used
+  generate_config:
+    max_new_tokens: 512 
+    return_dict_in_generate: True
+    output_logits: True
+    #prompt: 'Complete the following partial code directly after the comment without any explanations:'
+
+task_config:
+  hidden_neuron: 6144
+  storage_paths: ["/data/trust_code/starcoder2/sae/training_data/leetcode_aug3_9", "/data/trust_code/starcoder2/sae/training_data/debugbench", "/data/trust_code/starcoder2/sae/training_data/evalpack"]
+  additional_storage_paths: []
+  #storage_path: "/data/trust_code/codellama34b/sae/training_data/oss"
+  sae_hidden: 128
+  topk: 32
+  normalize: True
+  epoch_num: 10
+  learning_rate: 2e-4
+  clip_grad: True
+  tied: True
+  #scheduler_type: "cos"
+  num_workers: 4
+  prefetch_factor: 4
+  store_type: "varied"
+  #contrastive_loss_fn: "ccs_loss"
+  contrastive_loss_fn: "contrastive_loss"
+  batch_size: 16
+  cold_start_epoch: 4
+  dataset_level_norm: False
+  next_token_pred: False
+  #store_type: "naive"
+  #contrastive: False
+
+  wandb_info:
+    key: ""
+    proj_name: "SparseAutoencoder_Code_starcoder2"
+  
+
+system_setting:
+  HF_HOME: "/data/data_disk/huggingface"
+  cache_dir: '/data/data_disk/huggingface/hub/'

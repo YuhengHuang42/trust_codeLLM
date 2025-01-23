@@ -1,0 +1,14 @@
+llm_config:
+  model_name: "Qwen/Qwen2.5-Coder-32B"
+  quantization: "8bit"
+  extract_code: False
+  generate_config:
+    max_new_tokens: 512 
+    return_dict_in_generate: True
+    output_logits: True
+
+task_config: ""
+
+system_setting: # change to "" if you want to use default huggingface path.
+  HF_HOME: "/data/data_disk/huggingface"
+  cache_dir: '/data/data_disk/huggingface/hub/'

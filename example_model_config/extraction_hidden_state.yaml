@@ -1,0 +1,26 @@
+llm_config:
+  model_name: "uukuguy/speechless-starcoder2-15b"
+  quantization: "16bit"
+  start_token: "<|endoftext|>" # Actually not used
+  generate_config:
+    max_new_tokens: 512 
+    return_dict_in_generate: True
+    output_logits: True
+    #prompt: 'Complete the following partial code directly after the comment without any explanations:'
+
+task_config:
+  hidden_layer: "model.layers.9" # Layer 10 / 40
+  hidden_neuron: 6144
+  dataset_name: "greengerong/leetcode"
+  feature_key_list: ["java", "python", "c++", "javascript"]
+  #dataset_name: "m-a-p/CodeFeedback-Filtered-Instruction"
+  #feature_key_list: ['answer']
+  #dataset_name: "ise-uiuc/Magicoder-OSS-Instruct-75K"
+  #feature_key_list: ['solution']
+  split_token: "\n"
+  store_storage_multiplier: 1.1 # 10% more storage than the dataset size
+  mutation_prop: [0.15, 0.2, 0.25]
+
+system_setting:
+  HF_HOME: "/data/data_disk/huggingface"
+  cache_dir: '/data/data_disk/huggingface/hub/'

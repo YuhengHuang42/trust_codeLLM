@@ -1,0 +1,39 @@
+llm_config:
+  model_name: "uukuguy/speechless-starcoder2-15b"
+  quantization: "16bit"
+  start_token: "<|endoftext|>" # Actually not used
+  generate_config:
+    max_new_tokens: 512 
+    return_dict_in_generate: True
+    output_logits: True
+    #prompt: 'Complete the following partial code directly after the comment without any explanations:'
+
+task_config:
+  layer: "model.layers.9" # Layer 10 / 40
+  collect_type: "hidden"
+  mode: "sae"
+  encoder_path: "/data/trust_code/starcoder2/sae/sae_10/n_latents_128_n_inputs_6144_epoch_9.pt"
+  fit_model_param:
+    net_layer: 4
+    input_dim: 128
+    hidden_dim: 32
+    lr: 1e-4
+    batch_size: 2
+    num_epochs: 20
+    weight_decay: 1e-5
+    act: "ReLU" #"SELU"  #"ReLU"
+    beta1: 0.9
+    
+
+  #training_data_file_name: "tracer_layer_{}_hidden_training_data.pt"
+  training_data_path_name: "layer_{}_hidden_training_data"
+  #training_data_file_name: "layer_{}_hidden_training_data.pt"
+  data_source: ["shelve", "shelve", "shelve"] #, "shelve"]
+  important_label_path_list: ["/data/trust_code/starcoder2/evalpack_repair/evalpack_line_error.json", "/data/trust_code/starcoder2/quixbug_repair/quixbug_line_error.json", "/data/trust_code/starcoder2/humaneval/openai/humaneval_line_error.json"] #, None]
+  dataset_list: ["evalpack", 'quixbug', 'humaneval'] #, 'safim']
+  data_path_list: ["/data/trust_code/starcoder2/evalpack_repair/repair", "/data/trust_code/starcoder2/quixbug_repair/repair", "/data/trust_code/starcoder2/humaneval/humaneval"] 
+  extract_code_list: [True, False, True]
+
+system_setting:
+  HF_HOME: "/data/data_disk/huggingface"
+  cache_dir: '/data/data_disk/huggingface/hub/'

@@ -1,0 +1,15 @@
+llm_config:
+  model_name: "Qwen/Qwen2.5-Coder-32B"
+  quantization: "8bit"
+  generate_config:
+    max_new_tokens: 1024 # https://github.com/codetlingua/codetlingua/blob/fceef6996112cf046e5cedaacd8a691e983bc2ee/translate/model.py#L437C94-L437C98
+    return_dict_in_generate: True
+    output_logits: True
+
+task_config:
+  repair_data_path: "LLM_repair"
+  repair_loc_folder: "LLM_repair/QuixBugs/"
+
+system_setting: # change to "" if you want to use default huggingface path.
+  HF_HOME: "/data/data_disk/huggingface"
+  cache_dir: '/data/data_disk/huggingface/hub/'

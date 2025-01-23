@@ -1,0 +1,24 @@
+llm_config:
+  model_name: "uukuguy/speechless-starcoder2-15b"
+  quantization: "16bit"
+  start_token: "<|endoftext|>" # Actually not used
+  generate_config:
+    max_new_tokens: 1024 
+    return_dict_in_generate: True
+    output_logits: True
+    #prompt: 'Complete the following partial code directly after the comment without any explanations:'
+
+task_config:
+  layer: "model.layers.9" # Layer 10 / 40
+  language: "python"
+  mode: "sae"
+  collect_type: "hidden"
+  detection_model_path: ""
+  max_profile_token_length: 4096
+  extract_code: True
+
+
+
+system_setting:
+  HF_HOME: "/data/data_disk/huggingface"
+  cache_dir: '/data/data_disk/huggingface/hub/'
