@@ -276,7 +276,8 @@ def main(
     config_file: Annotated[Path, typer.Option()],
     result_output_path: Annotated[Path, typer.Option()],
     print_freq_prop: Annotated[float, typer.Option("--print-freq-prop")] = 0.2,
-    device: Annotated[str, typer.Option("--device")] = "cuda"
+    device: Annotated[str, typer.Option("--device")] = "cuda",
+    sae_hidden: Annotated[int, typer.Option("--sae-hidden")] = None,
 ):
     start = time.time()
     # ===== Load configuration =====
@@ -285,7 +286,9 @@ def main(
     hidden_neuron = config_dict["task_config"]["hidden_neuron"]
     storage_paths = config_dict['task_config']["storage_paths"]
     additional_storage_paths = config_dict['task_config'].get("additional_storage_paths", None)
-    sae_hidden = config_dict["task_config"]["sae_hidden"]
+    if sae_hidden is None:
+        # Overwrite the config file if sae_hidden is provided
+        sae_hidden = config_dict["task_config"]["sae_hidden"]
     topk = config_dict["task_config"]["topk"]
     normalize = config_dict["task_config"]["normalize"]
     epoch_num = int(config_dict["task_config"]["epoch_num"])
