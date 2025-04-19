@@ -1,0 +1,9 @@
+loguru==0.7.2
+typer==0.12.5
+bitsandbytes==0.43.3
+javalang==0.13.0
+tensordict==0.5.0
+tree-sitter
+tree-sitter-python
+imbalanced-learn
+h5py==3.11.0
