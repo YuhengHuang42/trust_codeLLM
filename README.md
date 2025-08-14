@@ -67,13 +67,13 @@ The overall structure of PtTrust is through LLM Evaluation --> hidden state extr
 
 ### Hidden State Extraction :wrench:
 
-Hidden state extraction is done through ``./method/collect_hidden_aug.py``. It is also configured through yaml files. Please refer to examples in `./example_model_config/extraction_hidden_state.yaml`. Please be aware this file is dataset specific. For example, for Leetcode dataset, we have a parameter called `mutation_prop` which indicates the proportion of code lines will be mutated.
+Hidden state extraction is done through ``./method/collect_hidden_aug.py``. It is also configured through YAML files. Please refer to examples in `./example_model_config/extraction_hidden_state.yaml`. Please be aware that this file is dataset-specific. For example, for the Leetcode dataset, we have a parameter called `mutation_prop` which indicates the proportion of code lines that will be mutated.
 
-The most important extraction utilities are under ``./method/extract``. In ``extract_util.py``, we have a class called ``TransHookRecorder``, which parses the target layer by string and extract the states given  that layer. Please refer to ``method/collect_hidden_aug.py`` for the specific usage (i.e., first define which layer to extract, then call ``recorder.forward`` with an LLM, and finally clear the cache of the recorder through ``recorder.clear_cache()``). 
+The most important extraction utilities are under ``./method/extract``. In ``extract_util.py``, we have a class called ``TransHookRecorder``, which parses the target layer by string and extracts the states given  that layer. Please refer to ``method/collect_hidden_aug.py`` for the specific usage (i.e., first define which layer to extract, then call ``recorder.forward`` with an LLM, and finally clear the cache of the recorder through ``recorder.clear_cache()``). 
 
 We also define some IO utilities in `method/extract/naive_store.py`. They directly store the extracted data to disk instead of memory. But there is still a lot of room for improvement. 
 
-`VariedKeyTensorStore` is index throguh key, while `NaiveTensorStore` is List.
+`VariedKeyTensorStore` is indexed through key, while `NaiveTensorStore` is a List.
 
 ### SAE Training :truck:
 
@@ -81,19 +81,23 @@ It is done in ``./method/sae_training.py``. The example configuration file is in
 
 ### Semantic Binding :rocket:
 
-The binding process of PtTrust is done in ``./method/semantic_binding_rank.py``. The example configuration file is ``./example_model_config/PtTrust_semantic_binding.yaml``. Please specify the path of your trained encoders in this file otherwise it will fallback to normal model (Probing classifiers). Specify ``agg`` parameters for training to enable classification mode (i.e., entire code snippet correctness prediction). 
+The binding process of PtTrust is done in ``./method/semantic_binding_rank.py``. The example configuration file is ``./example_model_config/PtTrust_semantic_binding.yaml``. Please specify the path of your trained encoders in this file; otherwise, it will fall back to the normal model (Probing classifiers). Specify ``agg`` parameters for training to enable classification mode (i.e., entire code snippet correctness prediction). 
+
+Labels are necessary in this stage. For prompts related to automatic labeling, please refer to: https://github.com/YuhengHuang42/trust_codeLLM/blob/main/utility/openai_utils.py
+
+Notice that we include a few-shot example in the prompt to obtain structural output for the following automatic extraction.
 
 ### Method Evaluation :rotating_light:
 
 Evaluation is done in ``./method/evaluate_binding.py``. Please refer to  ``./example_model_config/eval_PtTrust_editeval.yaml`` for details. According to the difference in the semantic binding stage, the evaluation script will automatically adapt to different settings.
 
-When performing evaluations, we rely on a specific label file referred as `important_label_path`. The data id indexes this file and contains a mapping betwen id -> which lines are incorrect. Related labels can be obtained through ``dataset_utils.find_buggy_positions`` by providing, for example, the identified incorrect code lines returned by OpenAI API. For diff-based labels, we used `utils.get_changes_with_line_numbers` for automatic labeling.
+When performing evaluations, we rely on a specific label file referred to as `important_label_path`. The data id indexes this file and contains a mapping betwen id -> which lines are incorrect. Related labels can be obtained through ``dataset_utils.find_buggy_positions`` by providing, for example, the identified incorrect code lines returned by the OpenAI API. For diff-based labels, we used `utils.get_changes_with_line_numbers` for automatic labeling.
 
 ## Example Data
 
 We uploaded example data at: https://drive.google.com/drive/folders/1BVHheTeZqVGdEq8Jn-e6mJOEf0uKnYTx?usp=drive_link
 
-Here, `openai_label` contains the returned labeling from GPT-4o API.
+Here, `openai_label` contains the returned labeling from the GPT-4o API.
 
 `xxx_inference` contains the inference result of different evaluation datasets using shelve. We also have `xxx_line_error.json` files in these directories as examples for `important_label`.
 
